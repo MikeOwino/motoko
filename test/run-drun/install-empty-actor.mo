@@ -7,12 +7,12 @@ actor a {
 
   public func go() : async() {
     // To get lots of cycles in both drun and ic-ref-run
-    if (Cycles.balance() == (0 : Nat64))
+    if (Cycles.balance() == 0)
       await Cycles.provisional_top_up_actor(a, 100_000_000_000_000);
 
     try {
       Prim.debugPrint("Installing actor:");
-      Cycles.add(2_000_000_000_000);
+      Cycles.add<system>(2_000_000_000_000);
       let principal = await Prim.createActor(wasm_mod, empty_arg);
       let id = debug_show principal;
       Prim.debugPrint(id);

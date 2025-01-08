@@ -40,6 +40,7 @@ s/WRAPMULOP/\'*%\'/g
 s/WRAPPOWOP/\'**%\'/g
 s/ANDASSIGN/\'\&=\'/g
 s/ACTOR/\'actor\'/g
+s/COMPOSITE/\'composite\'/g
 s/IGNORE/\'ignore\'/g
 s/IMPORT/\'import\'/g
 s/XOROP/\'^\'/g
@@ -50,8 +51,10 @@ s/SHROP/\' >>\'/g
 s/SHRASSIGN/\'>>=\'/g
 s/UNDERSCORE/\'_\'/g
 s/TYPE/\'type\'/g
+s/TRANSIENT/\'transient\'/g
 s/TRY/\'try\'/g
 s/THROW/\'throw\'/g
+s/FINALLY/\'finally\'/g
 s/TEXT/<text>/g
 s/SWITCH/\'switch\'/g
 s/SUBOP/\'-\'/g
@@ -70,7 +73,10 @@ s/RETURN/\'return\'/g
 s/RCURLY/\'}\'/g
 s/RBRACKET/\']\'/g
 s/QUEST/\'?\'/g
+s/BANG/\'!\'/g
 s/QUERY/\'query\'/g
+s/PERSISTENT/\'persistent\'/g
+s/PIPE/\'|>\'/g
 s/PUBLIC/\'public\'/g
 s/PRIVATE/\'private\'/g
 s/POWOP/\'**\'/g
@@ -101,6 +107,8 @@ s/LABEL/\'label\'/g
 s/CONTINUE/\'continue\'/g
 s/IN/\'in\'/g
 s/IF/\'if\'/g
+s/TO_CANDID/\'to_candid\'/g
+s/FROM_CANDID/\'from_candid\'/g
 s/ID/<id>/g
 s/HASH/\'#\'/g
 s/GTOP/\' > \'/g
@@ -129,7 +137,9 @@ s/CATASSIGN/\'@=\'/g
 s/CASE/\'case\'/g
 s/BREAK/\'break\'/g
 s/BOOL/<bool>/g
+s/AWAITSTAR/\'await*\'/g
 s/AWAIT/\'await\'/g
+s/ASYNCSTAR/\'async*\'/g
 s/ASYNC/\'async\'/g
 s/ASSERT/\'assert\'/g
 s/ARROW/\'->\'/g
@@ -139,5 +149,6 @@ s/ASSIGN/\':=\'/g
 s/DO/\'do\'/g
 s/OR/\'or\'/g
 s/AND/\'and\'/g
+s/WITH/\'with\'/g
 /'return'$/d
 s/'return' <exp>/'return' <exp>?/

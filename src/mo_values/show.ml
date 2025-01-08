@@ -52,7 +52,7 @@ let rec show_val t v =
   | T.(Prim Float), Value.Float i -> Numerics.Float.to_string i
   | T.(Prim Text), Value.Text s -> "\"" ^ s ^ "\""
   | T.(Prim Blob), Value.Blob s -> "\"" ^ Value.Blob.escape s ^ "\""
-  | T.(Prim Char), Value.Char c -> "\'" ^ Wasm.Utf8.encode [c] ^ "\'"
+  | T.(Prim Char), Value.Char c -> "\'" ^ Lib.Utf8.encode [c] ^ "\'"
   | T.(Prim Principal), Value.Blob s -> Ic.Url.encode_principal s
   | T.(Prim Null), Value.Null -> "null"
   | T.Opt _, Value.Null -> "null"
@@ -83,7 +83,7 @@ let rec show_val t v =
     end
   | _ ->
     Format.eprintf "@[show_val: %a : %a@.@]"
-      (Value.pp_val 2) v
+      (Value.pp_val 2) (t, v)
       T.pp_typ t;
     assert false
 

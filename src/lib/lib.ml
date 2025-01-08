@@ -1,3 +1,5 @@
+module StdList = List
+
 module Format =
 struct
   let with_str_formatter f x =
@@ -153,9 +155,15 @@ end
 
 module String =
 struct
+
   let implode cs =
     let buf = Buffer.create 80 in
     List.iter (Buffer.add_char buf) cs;
+    Buffer.contents buf
+
+  let implode_map f cs =
+    let buf = Buffer.create 80 in
+    List.iter (fun c -> Buffer.add_char buf (f c)) cs;
     Buffer.contents buf
 
   let explode s =
@@ -163,6 +171,12 @@ struct
     for i = String.length s - 1 downto 0 do cs := s.[i] :: !cs done;
     !cs
 
+  let explode_map f s =
+    let cs = ref [] in
+    for i = String.length s - 1 downto 0 do cs := f s.[i] :: !cs done;
+    !cs
+
+  (** Stack.fold (fun x y -> y ^ c ^ x) "" (String.split s c) == s *)
   let split s c =
     let len = String.length s in
     let rec loop i =
@@ -195,6 +209,11 @@ struct
     else
       None
 
+  let starts_with prefix s = (* in OCaml 4.13 *)
+    match chop_prefix prefix s with
+    | Some _ -> true
+    | _ -> false
+
   let chop_suffix suffix s =
     let suffix_len = String.length suffix in
     let s_len = String.length s in
@@ -217,6 +236,95 @@ struct
       | c -> Buffer.add_char buf c
     done;
     Buffer.contents buf
+
+  (* Courtesy of Claude.ai *)
+  let levenshtein_distance s t =
+    let m = String.length s
+    and n = String.length t in
+
+    (* Ensure s is the shorter string for optimization *)
+    let (s, t, m, n) = if m > n then (t, s, n, m) else (s, t, m, n) in
+
+    (* Initialize the previous row *)
+    let previous_row = Array.init (m + 1) (fun i -> i) in
+
+    (* Compute the distance *)
+    for i = 1 to n do
+      let current_row = Array.make (m + 1) 0 in
+      current_row.(0) <- i;
+
+      for j = 1 to m do
+        let cost = if s.[j-1] = t.[i-1] then 0 else 1 in
+        current_row.(j) <- min
+          (min
+            (previous_row.(j) + 1)     (* Deletion *)
+            (current_row.(j-1) + 1)    (* Insertion *)
+          )
+          (previous_row.(j-1) + cost)  (* Substitution *)
+      done;
+
+      (* Swap rows *)
+      Array.blit current_row 0 previous_row 0 (m + 1)
+    done;
+
+    (* Return the distance *)
+    previous_row.(m)
+
+end
+
+module Utf8 =
+struct
+  type t = int list
+  exception Utf8 = Wasm.Utf8.Utf8
+
+  let rec is_valid s = is_valid' (String.explode_map Char.code s)
+  and is_valid' = function
+    | [] -> true
+    | b1::bs when b1 < 0x80 ->
+      is_valid' bs
+    | b1::bs when b1 < 0xc0 -> false
+    | b1::b2::bs when b1 < 0xe0 ->
+      (b2 land 0xc0 = 0x80) && is_valid' bs
+    | b1::b2::b3::bs when b1 < 0xf0 ->
+      (b2 land 0xc0 = 0x80) && (b3 land 0xc0 = 0x80) && is_valid' bs
+    | b1::b2::b3::b4::bs when b1 < 0xf8 ->
+      (b2 land 0xc0 = 0x80) && (b3 land 0xc0 = 0x80) && (b4 land 0xc0 = 0x80) && is_valid' bs
+    | _ -> false
+
+  let con b = if b land 0xc0 = 0x80 then b land 0x3f else raise Utf8
+  let code min n =
+    if n < min || (0xd800 <= n && n < 0xe000) || n >= 0x110000 then raise Utf8
+    else n
+
+  let rec decode s = decode' [] (String.explode_map Char.code s)
+  and decode' acc = function
+    | [] -> List.rev acc
+    | b1::bs when b1 < 0x80 ->
+      decode' (code 0x0 b1 :: acc) bs
+    | b1::bs when b1 < 0xc0 -> raise Utf8
+    | b1::b2::bs when b1 < 0xe0 ->
+      decode' (code 0x80 ((b1 land 0x1f) lsl 6 + con b2) :: acc) bs
+    | b1::b2::b3::bs when b1 < 0xf0 ->
+      decode' (code 0x800 ((b1 land 0x0f) lsl 12 + con b2 lsl 6 + con b3) :: acc) bs
+    | b1::b2::b3::b4::bs when b1 < 0xf8 ->
+      decode' (code 0x10000 ((b1 land 0x07) lsl 18 + con b2 lsl 12 + con b3 lsl 6 + con b4) :: acc) bs
+    | _ -> raise Utf8
+
+  let con n = 0x80 lor (n land 0x3f)
+
+  let rec encode ns = String.implode_map Char.chr (encode' [] ns)
+  and encode' acc = function
+    | [] -> List.rev acc
+    | n::ns when n < 0 -> raise Utf8
+    | n::ns when n < 0x80 ->
+      encode' (n :: acc) ns
+    | n::ns when n < 0x800 ->
+      encode' (con n :: 0xc0 lor (n lsr 6) :: acc) ns
+    | n::ns when n < 0x10000 ->
+      encode' (con n :: con (n lsr 6) :: 0xe0 lor (n lsr 12) :: acc) ns
+    | n::ns when n < 0x110000 ->
+      encode' (con n :: con (n lsr 6) :: con (n lsr 12) :: 0xf0 lor (n lsr 18) :: acc) ns
+    | _ -> raise Utf8
 end
 
 module List =
@@ -430,10 +538,14 @@ end
 
 module Option =
 struct
-  let get o x =
-    match o with
-    | Some y -> y
-    | None -> x
+  let get o x = Option.value o ~default:x
+
+  let exists f o = Option.to_list o |> StdList.exists f
+
+  let map2 f a b =
+    match a, b with
+    | Some a, Some b -> Some (f a b)
+    | _ -> None
 
   module Syntax =
   struct
@@ -526,26 +638,31 @@ end
 
 module FilePath =
 struct
+  let segments p = String.split p '/'
+
   let normalise file_path =
     if file_path = "" then "" else
     let has_trailing_slash =
       Stdlib.Option.is_some (String.chop_suffix "/" file_path) in
     let has_leading_slash = not (Filename.is_relative file_path) in
     let acc = Stack.create () in
-    String.split file_path '/'
-    |> Stdlib.List.iter
-         (function
-          | "" -> ()
-          | "." -> ()
-          | ".." ->
-             if Stack.is_empty acc || Stack.top acc = ".."
-             then Stack.push ".." acc
-             else ignore (Stack.pop acc)
-          | segment -> Stack.push segment acc);
+    segments file_path |> Stdlib.List.iter
+     (function
+      | "" -> ()
+      | "." -> ()
+      | ".." ->
+         if Stack.is_empty acc || Stack.top acc = ".."
+         then Stack.push ".." acc
+         else ignore (Stack.pop acc)
+      | segment -> Stack.push segment acc);
     let result = Stack.fold (fun x y -> y ^ "/" ^ x) "" acc in
-    let prefix = if has_leading_slash then "/" else "" in
-    prefix ^ (if has_trailing_slash
-      then result
+    if result = ""
+    then
+      (if has_leading_slash then "/" else
+      (if has_trailing_slash then "./" else "."))
+    else
+      (if has_leading_slash then "/" else "") ^
+      (if has_trailing_slash then result
       else Stdlib.Option.get (String.chop_suffix "/" result))
 
   let relative_to base path =
@@ -556,8 +673,6 @@ struct
     if not (Filename.is_relative path)
     then path
     else normalise (Filename.concat base path)
-
-  let segments p = String.split p '/'
 
   let is_subpath base path =
     if Filename.is_relative base || Filename.is_relative path
@@ -618,6 +733,35 @@ struct
   let%test "Base32.decode 000000000000" = Base32.decode "AAAAAAAA" = Ok "\x00\x00\x00\x00\x00"
   let%test "Base32.decode DEADBEEF" = Base32.decode "32W353Y" = Ok "\xDE\xAD\xBE\xEF"
 
+  let%test "Utf8.decode prim emoji" = Wasm.Utf8.encode (Utf8.decode "mo:⛔") = "mo:⛔"
+  let%test "Utf8.encode prim emoji" = Utf8.encode (Wasm.Utf8.decode "mo:⛔") = "mo:⛔"
+
+  let%test "Utf8.encode decode large" =
+    (* this test overflows if we use Wasm.Utf8 functions instead *)
+    let b = Buffer.create 16 in
+    for i = 0 to 65535*16 do
+      Buffer.add_char b (Char.chr (i land 0x7F))
+    done;
+    let s = Buffer.contents b in
+    Utf8.is_valid s &&
+    Utf8.encode (Utf8.decode s) = s
+
+  let%test "Utf8.is_valid agrees with Utf8.decode for single-byte strings" =
+    let rec loop f i =
+      if i > 0xFF then true
+      else if not (f i) then false
+      else loop f (i + 1)
+    in loop (fun i ->
+      let s = Utf8.encode [i] in
+      Utf8.is_valid s = (try (ignore (Utf8.decode s); true) with Utf8.Utf8 -> false)
+    ) 0
+
+  let%test "String.split \"\"" = String.split "" '/' = [""]
+  let%test "String.split \"/\"" = String.split "/" '/' = ["";""]
+  let%test "String.split \"//\"" = String.split "//" '/' = ["";"";""]
+  let%test "String.split \"a/b/c\"" = String.split "a/b/c" '/' = ["a";"b";"c"]
+  let%test "String.split \"a/b//c\"" = String.split "a/b//c" '/' = ["a";"b";"";"c"]
+
   (* FilePath tests *)
   let normalise_test_case input expected =
     let actual = FilePath.normalise input in
@@ -652,6 +796,9 @@ struct
   let%test "it preserves trailing slashes" =
     normalise_test_case "lib/foo/" "lib/foo/"
 
+  let%test "it combines multiple trailing slashes" =
+    normalise_test_case "lib/foo//" "lib/foo/"
+
   let%test "it drops intermediate references to the `.` directory" =
     normalise_test_case "lib/./foo/" "lib/foo/"
 
@@ -672,6 +819,18 @@ struct
 
   let%test "it handles absolute directory paths" =
     normalise_test_case "/foo/./lib/" "/foo/lib/"
+
+  let%test "it handles ." =
+    normalise_test_case "." "."
+
+  let%test "it handles ./" =
+    normalise_test_case "./." "."
+
+  let%test "it handles ./" =
+    normalise_test_case "./" "./"
+
+  let%test "it handles .//" =
+    normalise_test_case ".//" "./"
 
   let%test "it makes one absolute path relative to another one" =
     relative_to_test_case

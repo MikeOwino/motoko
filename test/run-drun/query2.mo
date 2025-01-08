@@ -6,12 +6,14 @@ actor counter = {
     Prim.debugPrintNat c;
   };
   public func printCounter () : async () {
+    assert 0 : Nat64 == Prim.replyDeadline();
     Prim.debugPrintNat c;
   };
   public func get() : async Nat {
     return c
   };
   public query func read() : async Nat {
+    assert 0 : Nat64 == Prim.replyDeadline();
     let tmp = c;
     c += 1;
     Prim.debugPrint "In read:";
@@ -54,7 +56,7 @@ counter.go(); //OR-CALL ingress go "DIDL\x00\x00"
 
   {
 
-  // sugar, surpressing shared
+  // sugar, suppressing shared
 
   let _ : actor { read: query () -> async Nat } = counter;
 

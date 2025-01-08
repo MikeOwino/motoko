@@ -1,3 +1,4 @@
+
 ;; Motoko major mode for Emacs
 ;; initially based on Swift Mode.
 
@@ -33,20 +34,27 @@
                '("actor"
                  "and"
                  "async"
+                 "async*"
                  "assert"
                  "await"
+                 "await*"
                  "break"
                  "case"
                  "catch"
                  "class"
                  "continue"
+                 "do"
                  "debug"
+                 "debug_show"
                  "else"
+                 "finally"
                  "flexible"
                  "for"
+                 "from_candid"
                  "func"
                  "if"
                  "in"
+                 "ignore"
                  "import"
                  "module"
                  "not"
@@ -57,6 +65,7 @@
                  "loop"
                  "private"
                  "public"
+                 "query"
                  "return"
                  "shared"
                  "stable"
@@ -64,11 +73,15 @@
                  "system"
                  "try"
                  "throw"
-                 "query"
+                 "to_candid"
+                 "with"
                  "type"
                  "var"
                  "while"
                  "prim"
+                 "invariant"
+                 "old"
+                 "implies"
                  ))
               ;; Braces introduce blocks; it's nice to make them stand
               ;; out more than ordinary symbols

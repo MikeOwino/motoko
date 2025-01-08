@@ -3,12 +3,13 @@
 
 # It imports default.nix both for linux and darwin, thus it cannot be part of
 # it.
-
-{ releaseVersion ? "latest" }:
+{ officialRelease ? false }:
 let
   nixpkgs = import ./nix { };
-  linux = import ./default.nix { system = "x86_64-linux"; inherit releaseVersion; };
-  darwin = import ./default.nix { system = "x86_64-darwin"; inherit releaseVersion; };
+  linux = import ./default.nix { system = "x86_64-linux"; inherit officialRelease; };
+  darwin = import ./default.nix { system = "x86_64-darwin"; inherit officialRelease; };
+
+  releaseVersion = import nix/releaseVersion.nix { pkgs = nixpkgs; inherit officialRelease; };
 
   as_tarball = dir: derivations:
     nixpkgs.runCommandNoCC "motoko-${releaseVersion}.tar.gz" {
@@ -24,14 +25,15 @@ let
     nixpkgs.runCommandNoCC "${name}-${releaseVersion}.js" {
       allowedRequisites = [];
     } ''
-      cp -v ${derivation}/bin/* $out
+      cp -v ${derivation}/bin/*.min.js $out
     '';
 
   release =
     nixpkgs.runCommandNoCC "motoko-release-${releaseVersion}" {} ''
       mkdir $out
-      cp ${as_tarball "x86_64-linux" (with linux; [ mo-ide mo-doc moc ])} $out/motoko-linux64-${releaseVersion}.tar.gz
-      cp ${as_tarball "x86_64-darwin" (with darwin; [ mo-ide mo-doc moc ])} $out/motoko-macos-${releaseVersion}.tar.gz
+      cp ${as_tarball "x86_64-linux" (with linux; [ mo-ide mo-doc moc ])} $out/motoko-Linux-x86_64-${releaseVersion}.tar.gz
+      cp ${as_tarball "x86_64-darwin" (with darwin; [ mo-ide mo-doc moc ])} $out/motoko-Darwin-x86_64-${releaseVersion}.tar.gz
+
       cp ${as_js "moc" linux.js.moc} $out/moc-${releaseVersion}.js
       cp ${as_js "moc-interpreter" linux.js.moc_interpreter} $out/moc-interpreter-${releaseVersion}.js
       tar --exclude=.github -C ${nixpkgs.sources.motoko-base} -czvf $out/motoko-base-library.tar.gz .

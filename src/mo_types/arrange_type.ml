@@ -3,23 +3,24 @@ open Wasm.Sexpr
 
 let ($$) head inner = Node (head, inner)
 
-let control c = match c with
+let control = function
   | Returns -> "Returns"
   | Promises -> "Promises"
   | Replies -> "Replies"
 
-let obj_sort s = match s with
+let obj_sort = function
   | Object -> Atom "Object"
   | Actor -> Atom "Actor"
   | Module -> Atom "Module"
   | Memory -> Atom "Memory"
 
-let func_sort s = match s with
+let func_sort = function
   | Local -> "Local"
   | Shared Write -> "Shared"
   | Shared Query -> "Shared Query"
+  | Shared Composite -> "Shared Composite"
 
-let prim p = match p with
+let prim = function
   | Null -> Atom "Null"
   | Bool -> Atom "Bool"
   | Nat -> Atom "Nat"
@@ -38,10 +39,11 @@ let prim p = match p with
   | Blob -> Atom "Blob"
   | Error -> Atom "Error"
   | Principal -> Atom "Principal"
+  | Region -> Atom "Region"
 
-let con c = Atom (Con.to_string c)
+let con c = Atom (Type.string_of_con c)
 
-let rec typ (t:Type.typ) = match t with
+let rec typ = function
   | Var (s, i)             -> "Var" $$ [Atom s; Atom (string_of_int i)]
   | Con (c, ts)            -> "Con" $$ (con c::List.map typ ts)
   | Prim p                 -> "Prim" $$ [prim p]
@@ -53,7 +55,8 @@ let rec typ (t:Type.typ) = match t with
   | Func (s, c, tbs, at, rt) ->
     "Func" $$ [Atom (func_sort s); Atom (control c)] @
       List.map typ_bind tbs @ [ "" $$ (List.map typ at); "" $$ (List.map typ rt)]
-  | Async (t1, t2)         -> "Async" $$ [typ t1; typ t2]
+  | Async (Fut, t1, t2)    -> "Async" $$ [typ t1; typ t2]
+  | Async (Cmp, t1, t2)    -> "Async*" $$ [typ t1; typ t2]
   | Mut t                  -> "Mut" $$ [typ t]
   | Any                    -> Atom "Any"
   | Non                    -> Atom "Non"

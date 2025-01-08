@@ -3,6 +3,7 @@ open Numerics
 
 module Blob : sig
   val escape : string -> string
+  val rand32 : unit -> string
 end
 
 (* Environment *)
@@ -18,7 +19,10 @@ type actor_id = string
 type context = value
 
 and func =
-   context -> value -> value cont -> unit
+  context -> value -> value cont -> unit
+
+and comp =
+  value cont -> value cont -> unit
 
 and value =
   | Null
@@ -43,6 +47,7 @@ and value =
   | Obj of value Env.t
   | Func of Call_conv.t * func
   | Async of async
+  | Comp of comp
   | Mut of value ref
   | Iter of value Seq.t ref (* internal to {b.vals(), t.chars()} iterator *)
 
@@ -96,6 +101,7 @@ val as_obj : value -> value Env.t
 val as_variant : value -> string * value
 val as_func : value -> Call_conv.t * func
 val as_async : value -> async
+val as_comp : value -> comp
 val as_mut : value -> value ref
 
 
@@ -107,8 +113,10 @@ val compare : value -> value -> int
 
 (* Pretty Printing *)
 
-val pp_val : int -> Format.formatter -> value -> unit
-val pp_def : int -> Format.formatter -> def -> unit
+(* NB: Pass Type.Non to print value at full dynamic, not static, type. *)
+val pp_val : int -> Format.formatter -> (Type.typ * value) -> unit
+val pp_def : int -> Format.formatter -> (Type.typ * def) -> unit
 
-val string_of_val : int -> value -> string
-val string_of_def : int -> def -> string
+(* NB: Pass Type.Non to print value at full dynamic, not static, type. *)
+val string_of_val : int -> Type.typ -> value -> string
+val string_of_def : int -> Type.typ -> def -> string
