@@ -2,39 +2,47 @@ open Mo_types
 
 open Syntax
 
+let (@~) it at = Source.annotate Const it at
 
 (* Compilation unit detection *)
 
 let is_actor_def e =
   let open Source in
   match e.it with
-  | AwaitE { it = AsyncE (_, {it = ObjBlockE ({ it = Type.Actor; _}, _fields); _ }) ; _  } -> true
+  | AwaitE (Type.Fut, { it = AsyncE (Type.Fut, _, {it = ObjBlockE ({ it = Type.Actor; _}, _t, _fields); _ }) ; _  }) -> true
   | _ -> false
 
 let as_actor_def e =
   let open Source in
   match e.it with
-  | AwaitE { it = AsyncE (_, {it = ObjBlockE ({ it = Type.Actor; _}, fields); note; at }) ; _  } ->
+  | AwaitE (Type.Fut, { it = AsyncE (Type.Fut, _, {it = ObjBlockE ({ it = Type.Actor; _}, _t, fields); note; at }) ; _  }) ->
     fields, note, at
   | _ -> assert false
+
+let is_module_def e =
+  let open Source in
+  match e.it with
+  | ObjBlockE ({ it = Type.Module; _}, _, _) -> true
+  | _ -> false
 
 (* Happens after parsing, before type checking *)
 let comp_unit_of_prog as_lib (prog : prog) : comp_unit =
   let open Source in
   let f = prog.note in
 
-  let finish imports u = { it = { imports; body = u }; note = f; at = no_region } in
+  let finish imports u =
+    { it = { imports = List.rev imports; body = u }; note = f; at = no_region } in
   let prog_typ_note = { empty_typ_note with note_typ = Type.unit } in
 
   let rec go imports ds : comp_unit =
     match ds with
     (* imports *)
-    | {it = LetD ({it = VarP n; _}, ({it = ImportE (url, ri); _} as e)); _} :: ds' ->
-      let i : import = { it = (n, url, ri); note = e.note.note_typ; at = e.at } in
-      go (imports @ [i]) ds'
+    | {it = LetD (p, ({it = ImportE (url, ri); _} as e), None); _} :: ds' ->
+      let i : import = { it = (p, url, ri); note = e.note.note_typ; at = e.at } in
+      go (i :: imports) ds'
 
     (* terminal expressions *)
-    | [{it = ExpD ({it = ObjBlockE ({it = Type.Module; _}, fields); _} as e); _}] when as_lib ->
+    | [{it = ExpD ({it = ObjBlockE ({it = Type.Module; _}, _t, fields); _} as e); _}] when as_lib ->
       finish imports { it = ModuleU (None, fields); note = e.note; at = e.at }
     | [{it = ExpD e; _} ] when is_actor_def e ->
       let fields, note, at = as_actor_def e in
@@ -43,9 +51,9 @@ let comp_unit_of_prog as_lib (prog : prog) : comp_unit =
       assert (List.length tbs > 0);
       finish imports { it = ActorClassU (sp, tid, tbs, p, typ_ann, self_id, fields); note = d.note; at = d.at }
     (* let-bound terminal expressions *)
-    | [{it = LetD ({it = VarP i1; _}, ({it = ObjBlockE ({it = Type.Module; _}, fields); _} as e)); _}] when as_lib ->
+    | [{it = LetD ({it = VarP i1; _}, ({it = ObjBlockE ({it = Type.Module; _}, _t, fields); _} as e), _); _}] when as_lib ->
       finish imports { it = ModuleU (Some i1, fields); note = e.note; at = e.at }
-    | [{it = LetD ({it = VarP i1; _}, e); _}] when is_actor_def e ->
+    | [{it = LetD ({it = VarP i1; _}, e, _); _}] when is_actor_def e ->
       let fields, note, at = as_actor_def e in
       finish imports { it = ActorU (Some i1, fields); note; at }
 
@@ -54,7 +62,12 @@ let comp_unit_of_prog as_lib (prog : prog) : comp_unit =
       if as_lib
       then
         (* Deprecated syntax, see Typing.check_lib *)
-        let fs = List.map (fun d -> {vis = Public None @@ no_region; dec = d; stab = None} @@ d.at) ds' in
+        (* Propagate deprecations *)
+        let fs = List.map (fun d ->
+          let trivia = Trivia.find_trivia prog.note.trivia d.at in
+          let depr = Trivia.deprecated_of_trivia_info trivia in
+          {vis = Public depr @@ no_region; dec = d; stab = None} @@ d.at) ds'
+        in
         finish imports {it = ModuleU (None, fs); at = no_region; note = empty_typ_note}
       else finish imports { it = ProgU ds; note = prog_typ_note; at = no_region }
   in
@@ -67,18 +80,19 @@ let obj_decs obj_sort at note id_opt fields =
   match id_opt with
   | None -> [
     { it = ExpD {
-        it = ObjBlockE ( { it = obj_sort; at; note = () }, fields);
+        it = ObjBlockE ( { it = obj_sort; at; note = () }, (None, None), fields);
         at;
         note };
       at; note }]
   | Some id -> [
     { it = LetD (
         { it = VarP id; at; note = note.note_typ },
-        { it = ObjBlockE ({ it = obj_sort; at; note = () }, fields);
-          at; note; });
+        { it = ObjBlockE ({ it = obj_sort; at; note = () }, (None, None), fields);
+          at; note; },
+        None);
       at; note
     };
-    { it = ExpD { it = VarE id; at; note };
+    { it = ExpD { it = VarE (id.it @~ id.at); at; note };
       at; note }
     ]
 
@@ -88,14 +102,15 @@ let obj_decs obj_sort at note id_opt fields =
 let decs_of_lib (cu : comp_unit) =
   let open Source in
   let { imports; body = cub; _ } = cu.it in
-  let import_decs = List.map (fun { it = (id, fp, ri); at; note}  ->
+  let import_decs = List.map (fun { it = (pat, fp, ri); at; note} ->
     { it = LetD (
-      { it = VarP id; at; note; },
+      pat,
       { it = ImportE (fp, ri);
         at;
-        note = { note_typ = note; note_eff = Type.Triv} });
+        note = { empty_typ_note with note_typ = note } },
+      None);
       at;
-      note = { note_typ = note; note_eff = Type.Triv } }) imports
+      note = { empty_typ_note with note_typ = note } }) imports
   in
   import_decs,
   match cub.it with

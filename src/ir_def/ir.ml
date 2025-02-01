@@ -56,9 +56,10 @@ type arg = (string, Type.typ) Source.annotated_phrase
 (* Expressions *)
 
 type exp = exp' phrase
+
 and exp' =
   | PrimE of (prim * exp list)                 (* primitive *)
-  | VarE of id                                 (* variable *)
+  | VarE of mut * id                           (* variable *)
   | LitE of lit                                (* literal *)
   | AssignE of lexp * exp                      (* assignment *)
   | BlockE of (dec list * exp)                 (* block *)
@@ -66,20 +67,27 @@ and exp' =
   | SwitchE of exp * case list                 (* switch *)
   | LoopE of exp                               (* do-while loop *)
   | LabelE of id * Type.typ * exp              (* label *)
-  | AsyncE of typ_bind * exp * Type.typ        (* async *)
+  | AsyncE of Type.async_sort * typ_bind * exp * Type.typ        (* async/async* *)
   | DeclareE of id * Type.typ * exp            (* local promise *)
   | DefineE of id * mut * exp                  (* promise fulfillment *)
   | FuncE of                                   (* function *)
       string * Type.func_sort * Type.control * typ_bind list * arg list * Type.typ list * exp
-  | SelfCallE of Type.typ list * exp * exp * exp (* essentially ICCallPrim (FuncE shared…) *)
+  | SelfCallE of Type.typ list * exp * exp * exp * exp (* essentially ICCallPrim (FuncE shared…) *)
   | ActorE of dec list * field list * system * Type.typ (* actor *)
-  | NewObjE of Type.obj_sort * field list * Type.typ  (* make an object *)
-  | TryE of exp * case list                    (* try/catch *)
+  | NewObjE of Type.obj_sort * field list * Type.typ     (* make an object *)
+  | TryE of exp * case list * (id * Type.typ) option (* try/catch/cleanup *)
 
 and system = {
   meta : meta;
+  (* TODO: use option expressions for (some or all of) these *)
   preupgrade : exp;
-  postupgrade : exp
+  postupgrade : exp;
+  heartbeat : exp;
+  timer : exp; (* TODO: use an option type: (Default of exp | UserDefined of exp) option *)
+  inspect : exp;
+  low_memory : exp;
+  stable_record: exp;
+  stable_type: Type.typ;
 }
 
 and candid = {
@@ -123,12 +131,14 @@ and prim =
   | IdxPrim                           (* array indexing *)
   | BreakPrim of id                   (* break *)
   | RetPrim                           (* return *)
-  | AwaitPrim                         (* await *)
+  | AwaitPrim of Type.async_sort       (* await/await* *)
   | AssertPrim                        (* assertion *)
   | ThrowPrim                         (* throw *)
   | ShowPrim of Type.typ              (* debug_show *)
   | SerializePrim of Type.typ list    (* Candid serialization prim *)
   | DeserializePrim of Type.typ list  (* Candid deserialization prim *)
+  | DeserializeOptPrim of Type.typ list
+     (* Candid deserialization prim (returning Opt) *)
   | NumConvTrapPrim of Type.prim * Type.prim
   | NumConvWrapPrim of Type.prim * Type.prim
   | DecodeUtf8
@@ -140,31 +150,37 @@ and prim =
   | SelfRef of Type.typ               (* returns the self actor ref *)
   | SystemTimePrim
   (* Array field iteration/access *)
-  | NextArrayOffset of spacing        (* advance array offset *)
-  | ValidArrayOffset                  (* verify array offset *)
-  | DerefArrayOffset                  (* array offset indexing *)
-  | GetPastArrayOffset of spacing     (* array offset past the last element *)
+  | NextArrayOffset                   (* advance compact array offset, as Nat *)
+  | EqArrayOffset                     (* equate compact array offset at type Int *)
+  | DerefArrayOffset                  (* compact array offset indexing (unchecked) *)
+  | GetLastArrayOffset                (* compact array offset of the last element, or -1, as Int *)
   (* Funds *)
   | SystemCyclesAddPrim
   | SystemCyclesAcceptPrim
   | SystemCyclesAvailablePrim
   | SystemCyclesBalancePrim
   | SystemCyclesRefundedPrim
+  | SystemCyclesBurnPrim
   | SetCertifiedData
   | GetCertificate
 
   | OtherPrim of string               (* Other primitive operation, no custom typing rule *)
   (* backend stuff *)
-  | CPSAwait of Type.typ
-  | CPSAsync of Type.typ
+  | CPSAwait of Type.async_sort * Type.typ
+                                      (* typ is the current continuation type of cps translation *)
+  | CPSAsync of Type.async_sort * Type.typ
+  | ICPerformGC
   | ICReplyPrim of Type.typ list
   | ICRejectPrim
   | ICCallerPrim
   | ICCallPrim
+  | ICCallRawPrim
+  | ICMethodNamePrim
+  | ICReplyDeadlinePrim
+  | ICArgDataPrim
   | ICStableWrite of Type.typ          (* serialize value of stable type to stable memory *)
   | ICStableRead of Type.typ           (* deserialize value of stable type from stable memory *)
-
-and spacing = One | ElementSize        (* increment units when iterating over arrays *)
+  | ICStableSize of Type.typ
 
 (* Declarations *)
 
@@ -172,6 +188,7 @@ and dec = dec' Source.phrase
 and dec' =
   | LetD of pat * exp                          (* immutable *)
   | VarD of id * Type.typ * exp                (* mutable *)
+  | RefD of id * Type.typ * lexp               (* reference - only required for flag --experimental_field_aliasing *)
 
 (* Literals *)
 
@@ -221,6 +238,13 @@ let full_flavor () : flavor = {
   has_poly_eq = true;
 }
 
+type actor_type = {
+  (* original actor type, including all actor fields *)
+  transient_actor_type: Type.typ;
+  (* record of stable actor fields used for persistence,
+     the fields are without mutability distinctions *)
+  stable_actor_type: Type.typ
+}
 
 (* Program *)
 
@@ -228,6 +252,7 @@ type comp_unit =
   | LibU of dec list * exp
   | ProgU of dec list
   | ActorU of arg list option * dec list * field list * system * Type.typ (* actor (class) *)
+     
 
 type prog = comp_unit * flavor
 
@@ -258,18 +283,19 @@ let map_prim t_typ t_id p =
   | ActorDotPrim _ -> p
   | ArrayPrim (m, t) -> ArrayPrim (m, t_typ t)
   | IdxPrim
-  | NextArrayOffset _
-  | ValidArrayOffset
+  | NextArrayOffset
+  | EqArrayOffset
   | DerefArrayOffset
-  | GetPastArrayOffset _ -> p
+  | GetLastArrayOffset -> p
   | BreakPrim id -> BreakPrim (t_id id)
   | RetPrim
-  | AwaitPrim
+  | AwaitPrim _
   | AssertPrim
   | ThrowPrim -> p
   | ShowPrim t -> ShowPrim (t_typ t)
   | SerializePrim ts -> SerializePrim (List.map t_typ ts)
   | DeserializePrim ts -> DeserializePrim (List.map t_typ ts)
+  | DeserializeOptPrim ts -> DeserializeOptPrim (List.map t_typ ts)
   | NumConvTrapPrim _
   | NumConvWrapPrim _
   | DecodeUtf8
@@ -285,15 +311,21 @@ let map_prim t_typ t_id p =
   | SystemCyclesAvailablePrim
   | SystemCyclesBalancePrim
   | SystemCyclesRefundedPrim
+  | SystemCyclesBurnPrim
   | SetCertifiedData
   | GetCertificate
   | OtherPrim _ -> p
-  | CPSAwait t -> CPSAwait (t_typ t)
-  | CPSAsync t -> CPSAsync (t_typ t)
+  | CPSAwait (s, t) -> CPSAwait (s, t_typ t)
+  | CPSAsync (s, t) -> CPSAsync (s, t_typ t)
   | ICReplyPrim ts -> ICReplyPrim (List.map t_typ ts)
+  | ICArgDataPrim
+  | ICPerformGC
   | ICRejectPrim
   | ICCallerPrim
-  | ICCallPrim -> p
+  | ICCallPrim
+  | ICCallRawPrim
+  | ICMethodNamePrim
+  | ICReplyDeadlinePrim -> p
   | ICStableWrite t -> ICStableWrite (t_typ t)
   | ICStableRead t -> ICStableRead (t_typ t)
-
+  | ICStableSize t -> ICStableSize (t_typ t)

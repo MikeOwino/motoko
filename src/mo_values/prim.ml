@@ -4,6 +4,8 @@ open Mo_types
 open Value
 open Numerics
 
+(* This function raises `Invalid_argument` exception, catch it in the call site
+   to convert to trap *)
 let as_big_int = function
   | Type.Nat -> fun v -> Nat.to_big_int (as_int v)
   | Type.Int -> fun v -> Int.to_big_int (as_int v)
@@ -18,6 +20,8 @@ let as_big_int = function
   | Type.Char -> fun v -> Big_int.big_int_of_int (as_char v)
   | t -> raise (Invalid_argument ("Value.as_big_int: " ^ Type.string_of_typ (Type.Prim t)))
 
+(* This function raises `Invalid_argument` exception, catch it in the call site
+   to convert to trap *)
 let of_big_int_trap = function
   | Type.Nat -> fun i -> Int (Nat.of_big_int i)
   | Type.Int -> fun i -> Int (Int.of_big_int i)
@@ -34,6 +38,8 @@ let of_big_int_trap = function
     if i < 0xD800 || i >= 0xE000 && i < 0x110000 then Char i else raise (Invalid_argument "character value out of bounds")
   | t -> raise (Invalid_argument ("Value.of_big_int_trap: " ^ Type.string_of_typ (Type.Prim t)))
 
+(* This function raises `Invalid_argument` exception, catch it in the call site
+   to convert to trap *)
 let of_big_int_wrap = function
   | Type.Nat8 -> fun i -> Nat8 (Nat8.wrapping_of_big_int i)
   | Type.Nat16 -> fun i -> Nat16 (Nat16.wrapping_of_big_int i)
@@ -49,44 +55,59 @@ let of_big_int_wrap = function
 Wrapping numeric conversions are all specified uniformly by going through bigint
 *)
 
+type trap = { trap : 'a. string -> 'a  }
+
 (* Trapping conversions (the num_conv_t1_t2 prim used in prelude/prelude.ml) *)
-let num_conv_trap_prim t1 t2 =
+let num_conv_trap_prim trap t1 t2 =
   let module T = Type in
   match t1, t2 with
   | T.Nat, T.(T.Nat8|Nat16|Nat32|Nat64)
   | T.Int, T.(Int8|Int16|Int32|Int64)
   | T.(Nat8|Nat16|Nat32|Nat64), T.Nat
   | T.(Int8|Int16|Int32|Int64), T.Int
+  | T.Nat8, T.Nat16
+  | T.Nat16, T.Nat32
+  | T.Nat32, T.Nat64
+  | T.Nat64, T.Nat32
+  | T.Nat32, T.Nat16
+  | T.Nat16, T.Nat8
+  | T.Int8, T.Int16
+  | T.Int16, T.Int32
+  | T.Int32, T.Int64
+  | T.Int64, T.Int32
+  | T.Int32, T.Int16
+  | T.Int16, T.Int8
   | T.Nat32, T.Char
-  -> fun v -> of_big_int_trap t2 (as_big_int t1 v)
-
+  -> fun v -> (try of_big_int_trap t2 (as_big_int t1 v)
+               with Invalid_argument msg -> trap.trap msg)
   | T.Float, T.Int64 -> fun v -> Int64 (Int_64.of_big_int (bigint_of_double (as_float v)))
   | T.Int64, T.Float -> fun v -> Float (Wasm.F64_convert.convert_i64_s (Big_int.int64_of_big_int (Int_64.to_big_int (as_int64 v))))
 
   | T.Float, T.Int -> fun v -> Int (Int.of_big_int (bigint_of_double (as_float v)))
   | T.Int, T.Float -> fun v -> Float (Wasm.F64.of_float (Big_int.float_of_big_int (Int.to_big_int (as_int v))))
 
-  | t1, t2 -> raise (Invalid_argument T.("Value.num_conv_trap_prim: " ^ string_of_typ (Prim t1) ^ string_of_typ (Prim t2) ))
+  | t1, t2 -> trap.trap T.("Value.num_conv_trap_prim: " ^ string_of_typ (Prim t1) ^ string_of_typ (Prim t2))
 
 (*
 It is the responsibility of prelude/prelude.ml to define num_wrap_t1_t2 only
 for suitable types t1 and t2
 *)
-let num_conv_wrap_prim t1 t2 =
-  fun v -> of_big_int_wrap t2 (as_big_int t1 v)
+let num_conv_wrap_prim trap t1 t2 =
+  fun v -> try of_big_int_wrap t2 (as_big_int t1 v)
+           with Invalid_argument msg -> trap.trap msg
 
-let prim =
+let prim trap =
   let via_float f v = Float.(Float (of_float (f (to_float (as_float v))))) in
   let via_float2 f v w = Float.(Float (of_float (f (to_float (as_float v)) (to_float (as_float w))))) in
   let unpack_nat8 v = Nat8.to_int (as_nat8 v) in
   let float_formatter prec : int -> float -> string =
     let open Printf in
     function
-    | 0 -> sprintf "%.*f" prec 
+    | 0 -> sprintf "%.*f" prec
     | 1 -> sprintf "%.*e" prec
     | 2 -> sprintf "%.*g" prec
     | 3 -> sprintf "%.*h" prec
-    | _ -> fun _ -> raise (Invalid_argument "float_formatter: unrecognised mode") in
+    | _ -> fun _ -> trap.trap "float_formatter: unrecognised mode" in
   function
   | "abs" -> fun _ v k -> k (Int (Nat.abs (as_int v)))
   | "fabs" -> fun _ v k -> k (Float (Float.abs (as_float v)))
@@ -125,7 +146,8 @@ let prim =
      | _ -> assert false)
   | "fexp" -> fun _ v k -> k (via_float Stdlib.exp v)
   | "flog" -> fun _ v k -> k (via_float Stdlib.log v)
-
+  (* TODO: refine exotic cases below to catch more errors *)
+  | "popcntInt8" | "popcntInt16" | "popcntInt32" | "popcntInt64"
   | "popcnt8" | "popcnt16" | "popcnt32" | "popcnt64" ->
      fun _ v k ->
      k (match v with
@@ -138,7 +160,7 @@ let prim =
         | Int32 w -> Int32 (Int_32.popcnt w)
         | Int64 w -> Int64 (Int_64.popcnt w)
         | _ -> failwith "popcnt")
-
+  | "clzInt8" | "clzInt16" | "clzInt32" | "clzInt64"
   | "clz8" | "clz16" | "clz32" | "clz64" ->
      fun _ v k ->
      k (match v with
@@ -151,7 +173,7 @@ let prim =
         | Int32 w -> Int32 (Int_32.clz w)
         | Int64 w -> Int64 (Int_64.clz w)
         | _ -> failwith "clz")
-
+  | "ctzInt8" | "ctzInt16" | "ctzInt32" | "ctzInt64"
   | "ctz8" | "ctz16" | "ctz32" | "ctz64" ->
      fun _ v k ->
      k (match v with
@@ -164,7 +186,7 @@ let prim =
         | Int32 w -> Int32 (Int_32.ctz w)
         | Int64 w -> Int64 (Int_64.ctz w)
         | _ -> failwith "ctz")
-
+  | "btstInt8" | "btstInt16" | "btstInt32" | "btstInt64"
   | "btst8" | "btst16" | "btst32" | "btst64" ->
      fun _ v k ->
      let w, a = as_pair v
@@ -179,18 +201,35 @@ let prim =
            | Int64 y -> Int64 Int_64.(and_ y (shl (of_int 1) (as_int64 a)))
            | _ -> failwith "btst")
 
+  | "lsh_Nat" -> fun _ v k ->
+    (match as_tup v with
+     | [x; shift] -> k (Int Numerics.Int.(mul (as_int x) (pow (of_int 2) (of_big_int (Nat32.to_big_int (as_nat32 shift))))))
+     | _ -> failwith "lsh_Nat")
+  | "rsh_Nat" -> fun _ v k ->
+    (match as_tup v with
+     | [x; shift] -> k (Int Numerics.Int.(div (as_int x) (pow (of_int 2) (of_big_int (Nat32.to_big_int (as_nat32 shift))))))
+     | _ -> failwith "rsh_Nat")
+
   | "conv_Char_Text" -> fun _ v k -> let str = match as_char v with
                                           | c when c <= 0o177 -> String.make 1 (Char.chr c)
-                                          | code -> Wasm.Utf8.encode [code]
+                                          | code -> Lib.Utf8.encode [code]
                                in k (Text str)
   | "print" -> fun _ v k -> Printf.printf "%s\n%!" (as_text v); k unit
-  | "trap" -> fun _ v k ->
-    raise (Invalid_argument ("explicit trap: "^ (as_text v)))
+  | "trap" -> fun _ v k -> trap.trap ("explicit trap: " ^ (as_text v))
   | "rts_version" -> fun _ v k -> as_unit v; k (Text "0.1")
-  | "rts_heap_size" -> fun _ v k -> as_unit v; k (Int (Int.of_int 0))
-  | "rts_total_allocation" -> fun _ v k -> as_unit v; k (Int (Int.of_int 0))
-  | "rts_outstanding_callbacks" -> fun _ v k -> as_unit v; k (Int (Int.of_int 0))
+  | (  "rts_memory_size"
+     | "rts_heap_size"
+     | "rts_total_allocation"
+     | "rts_reclaimed"
+     | "rts_max_live_size"
+     | "rts_callback_table_count"
+     | "rts_callback_table_size"
+     | "rts_mutator_instructions"
+     | "rts_collector_instructions"
+     | "rts_upgrade_instructions") ->
+        fun _ v k -> as_unit v; k (Int (Int.of_int 0))
   | "time" -> fun _ v k -> as_unit v; k (Value.Nat64 (Numerics.Nat64.of_int 42))
+  | "deadline" -> fun _ v k -> as_unit v; k (Value.Nat64 Numerics.Nat64.zero)
   | "idlHash" -> fun _ v k ->
     let s = as_text v in
     k (Nat32 (Nat32.wrapping_of_big_int (Big_int.big_int_of_int32 (Lib.Uint32.to_int32 (Idllib.IdlHash.idl_hash s)))))
@@ -215,9 +254,26 @@ let prim =
     | Seq.Cons (v, vs) -> i := vs; k v
     end
   | "text_len" -> fun _ v k ->
-    k (Int (Nat.of_int (List.length (Wasm.Utf8.decode (Value.as_text v)))))
+    k (Int (Nat.of_int (List.length (Lib.Utf8.decode (Value.as_text v)))))
+  | "text_lowercase" ->
+     fun _ v k ->
+     k (Text (String.lowercase_ascii (Value.as_text v))) (* TODO -- use Unicode here. *)
+  | "text_uppercase" -> fun _ v k ->
+     k (Text (String.uppercase_ascii (Value.as_text v))) (* TODO -- use Unicode here. *)
+  | "text_compare" -> fun _ v k ->
+    (match Value.as_tup v with
+     | [a; b] -> k (Int8 (Int_8.of_int
+                            (let a, b = Value.as_text a, Value.as_text b in
+                             if a = b then 0 else if a < b then -1 else 1)))
+     | _ -> assert false)
+  | "blob_compare" -> fun _ v k ->
+    (match Value.as_tup v with
+     | [a; b] -> k (Int8 (Int_8.of_int
+                            (let a, b = Value.as_blob a, Value.as_blob b in
+                             if a = b then 0 else if a < b then -1 else 1)))
+     | _ -> assert false)
   | "text_iter" -> fun _ v k ->
-    let s = Wasm.Utf8.decode (Value.as_text v) in
+    let s = Lib.Utf8.decode (Value.as_text v) in
     let i = Seq.map (fun c -> Char c) (List.to_seq s) in
     k (Iter (ref i))
   | "Array.init" -> fun _ v k ->
@@ -238,6 +294,13 @@ let prim =
       in go (fun xs -> xs) k 0
     | _ -> assert false
     )
+
+
+  | "cast"
+  | "blobOfPrincipal"
+  | "principalOfBlob"
+  | "principalOfActor" -> fun _ v k -> k v
+
   | "blobToArray" -> fun _ v k ->
     k (Array (Array.of_seq (Seq.map (fun c ->
       Nat8 (Nat8.of_int (Char.code c))
@@ -255,14 +318,16 @@ let prim =
       Char.chr (Nat8.to_int (Value.as_nat8 !(Value.as_mut v)))
     ) (Array.to_seq (Value.as_array v)))))
 
-  | "cast" -> fun _ v k -> k v
+  (* calls never fail in the interpreter *)
+  | "call_perform_status" -> fun _ v k -> k (Nat32 Nat32.zero)
+  | "call_perform_message" -> fun _ v k -> k (Value.Text "")
 
   | p when Lib.String.chop_prefix "num_conv" p <> None ->
     begin match String.split_on_char '_' p with
     | [_;_;s1;s2] ->
       let p1 = Type.prim s1 in
       let p2 = Type.prim s2 in
-      fun env v k -> k (num_conv_trap_prim p1 p2 v)
+      fun env v k -> k (num_conv_trap_prim trap p1 p2 v)
     | _ -> assert false
     end
 
@@ -271,7 +336,7 @@ let prim =
     | [_;_;s1;s2] ->
       let p1 = Type.prim s1 in
       let p2 = Type.prim s2 in
-      fun env v k -> k (num_conv_wrap_prim p1 p2 v)
+      fun env v k -> k (num_conv_wrap_prim trap p1 p2 v)
     | _ -> assert false
     end
 
@@ -310,12 +375,25 @@ let prim =
   | "decodeUtf8" ->
       fun _ v k ->
         let s = as_blob v in
-        begin match Wasm.Utf8.decode s with
+        begin match Lib.Utf8.decode s with
           | _ -> k (Opt (Text s))
-          | exception Wasm.Utf8.Utf8 -> k Null
+          | exception Lib.Utf8.Utf8 -> k Null
         end
 
   | "encodeUtf8" ->
       fun _ v k -> k (Blob (as_text v))
 
-  | s -> raise (Invalid_argument ("Value.prim: " ^ s))
+  | "is_controller" ->
+      fun _ v k -> k (Bool false)
+
+  | "canister_version" ->
+      fun _ v k -> as_unit v; k (Nat64 (Numerics.Nat64.of_int 42))
+
+  (* fake *)
+  | "setCandidLimits" ->
+      fun _ v k -> k unit
+  | "getCandidLimits" ->
+      fun _ v k -> k (Tup [
+        Nat32 Numerics.Nat32.zero; Nat32 Numerics.Nat32.zero; Nat32 Numerics.Nat32.zero])
+
+  | s -> trap.trap ("Value.prim: " ^ s)

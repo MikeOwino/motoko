@@ -12,15 +12,17 @@ let empty_typ_note = {note_typ = Type.Pre; note_eff = Type.Triv}
 
 (* Resolved imports (filled in separately after parsing) *)
 
+type lib_path = {package : string option; path : string}
 type resolved_import =
   | Unresolved
-  | LibPath of string
+  | LibPath of lib_path
   | IDLPath of (string * string) (* filepath * bytes *)
   | PrimPath (* the built-in prim module *)
 
 (* Identifiers *)
 
 type id = string Source.phrase
+(* type id_ref, see below *)
 type typ_id = (string, Type.con option) Source.annotated_phrase
 
 
@@ -31,11 +33,14 @@ type func_sort = Type.func_sort Source.phrase
 
 type mut = mut' Source.phrase
 and mut' = Const | Var
+and id_ref = (string, mut') Source.annotated_phrase
 
 and path = (path', Type.typ) Source.annotated_phrase
 and path' =
   | IdH  of id
   | DotH of path * id
+
+and async_sort = Type.async_sort
 
 type typ = (typ', Type.typ) Source.annotated_phrase
 and typ' =
@@ -47,7 +52,7 @@ and typ' =
   | VariantT of typ_tag list                       (* variant *)
   | TupT of typ_item list                          (* tuple *)
   | FuncT of func_sort * typ_bind list * typ * typ (* function *)
-  | AsyncT of scope * typ                          (* future *)
+  | AsyncT of async_sort * scope * typ             (* future / computation *)
   | AndT of typ * typ                              (* intersection *)
   | OrT of typ * typ                               (* union *)
   | ParT of typ                                    (* parentheses, used to control function arity only *)
@@ -55,7 +60,9 @@ and typ' =
 
 and scope = typ
 and typ_field = typ_field' Source.phrase
-and typ_field' = {id : id; typ : typ; mut : mut}
+and typ_field' =
+  | ValF of id * typ * mut
+  | TypF of typ_id * typ_bind list * typ
 
 and typ_tag = typ_tag' Source.phrase
 and typ_tag' = {tag : id; typ : typ}
@@ -121,14 +128,14 @@ and vis' =
   | System
 
 let is_public vis = match vis.Source.it with Public _ -> true | _ -> false
+let is_private vis = match vis.Source.it with Private -> true | _ -> false
 
 type stab = stab' Source.phrase
 and stab' = Stable | Flexible
 
 type op_typ = Type.typ ref (* For overloaded resolution; initially Type.Pre. *)
 
-
-type inst = (typ list option, Type.typ list) Source.annotated_phrase (* For implicit scope instantiation *)
+type inst = ((bool * typ list) option, Type.typ list) Source.annotated_phrase (* For implicit scope instantiation *)
 
 type sort_pat = (Type.shared_sort * pat) Type.shared Source.phrase
 
@@ -144,20 +151,22 @@ type sugar = bool (* Is the source of a function body a block `<block>`,
 type exp = (exp', typ_note) Source.annotated_phrase
 and exp' =
   | PrimE of string                            (* primitive *)
-  | VarE of id                                 (* variable *)
+  | VarE of id_ref                             (* variable *)
   | LitE of lit ref                            (* literal *)
   | ActorUrlE of exp                           (* actor reference *)
   | UnE of op_typ * unop * exp                 (* unary operator *)
   | BinE of op_typ * exp * binop * exp         (* binary operator *)
   | RelE of op_typ * exp * relop * exp         (* relational operator *)
   | ShowE of (op_typ * exp)                    (* debug show operator *)
+  | ToCandidE of exp list                      (* to_candid operator *)
+  | FromCandidE of exp                         (* from_candid operator *)
   | TupE of exp list                           (* tuple *)
   | ProjE of exp * int                         (* tuple projection *)
   | OptE of exp                                (* option injection *)
   | DoOptE of exp                              (* option monad *)
   | BangE of exp                               (* scoped option projection *)
-  | ObjBlockE of obj_sort * dec_field list     (* object block *)
-  | ObjE of exp_field list                     (* record literal *)
+  | ObjBlockE of obj_sort * (id option * typ option) * dec_field list  (* object block *)
+  | ObjE of exp list * exp_field list          (* record literal/extension *)
   | TagE of id * exp                           (* variant *)
   | DotE of exp * id                           (* object projection *)
   | AssignE of exp * exp                       (* assignment *)
@@ -169,6 +178,8 @@ and exp' =
   | NotE of exp                                (* negation *)
   | AndE of exp * exp                          (* conjunction *)
   | OrE of exp * exp                           (* disjunction *)
+  | ImpliesE of exp * exp                      (* implication *)
+  | OldE of exp                                (* old-expression *)
   | IfE of exp * exp * exp                     (* conditional *)
   | SwitchE of exp * case list                 (* switch *)
   | WhileE of exp * exp                        (* while-do loop *)
@@ -178,18 +189,20 @@ and exp' =
   | BreakE of id * exp                         (* break *)
   | RetE of exp                                (* return *)
   | DebugE of exp                              (* debugging *)
-  | AsyncE of typ_bind * exp                   (* async *)
-  | AwaitE of exp                              (* await *)
-  | AssertE of exp                             (* assertion *)
+  | AsyncE of async_sort * typ_bind * exp      (* future / computation *)
+  | AwaitE of async_sort * exp                 (* await *)
+  | AssertE of assert_kind * exp               (* assertion *)
   | AnnotE of exp * typ                        (* type annotation *)
   | ImportE of (string * resolved_import ref)  (* import statement *)
   | ThrowE of exp                              (* throw exception *)
-  | TryE of exp * case list                    (* catch exception *)
+  | TryE of exp * case list * exp option       (* catch exception / finally *)
   | IgnoreE of exp                             (* ignore *)
 (*
-  | FinalE of exp * exp                        (* finally *)
   | AtomE of string                            (* atom *)
 *)
+
+and assert_kind =
+  | Runtime | Static | Invariant | Precondition | Postcondition | Concurrency of string | Loop_entry | Loop_continue | Loop_exit | Loop_invariant
 
 and dec_field = dec_field' Source.phrase
 and dec_field' = {dec : dec; vis : vis; stab: stab option}
@@ -206,7 +219,7 @@ and case' = {pat : pat; exp : exp}
 and dec = (dec', typ_note) Source.annotated_phrase
 and dec' =
   | ExpD of exp                                (* plain unit expression *)
-  | LetD of pat * exp                          (* immutable *)
+  | LetD of pat * exp * exp option             (* immutable, with an optional fail block *)
   | VarD of id * exp                           (* mutable *)
   | TypD of typ_id * typ_bind list * typ       (* type *)
   | ClassD of                                  (* class *)
@@ -227,7 +240,7 @@ and stab_sig' = (dec list * typ_field list)      (* type declarations & stable a
 (* Compilation units *)
 
 type import = (import', Type.typ) Source.annotated_phrase
-and import' = id * string * resolved_import ref
+and import' = pat * string * resolved_import ref
 
 type comp_unit_body = (comp_unit_body', typ_note) Source.annotated_phrase
 and comp_unit_body' =
@@ -249,15 +262,15 @@ type lib = comp_unit
 (* Helpers *)
 
 let (@@) = Source.(@@)
-let (@?) it at = Source.({it; at; note = empty_typ_note})
-let (@!) it at = Source.({it; at; note = Type.Pre})
-let (@=) it at = Source.({it; at; note = None})
-
+let (@~) it at = Source.annotate Const it at
+let (@?) it at = Source.annotate empty_typ_note it at
+let (@!) it at = Source.annotate Type.Pre it at
+let (@=) it at = Source.annotate None it at
 
 (* NB: This function is currently unused *)
 let string_of_lit = function
   | BoolLit false -> "false"
-  | BoolLit true  ->  "true"
+  | BoolLit true  -> "true"
   | IntLit n
   | NatLit n      -> Numerics.Int.to_pretty_string n
   | Int8Lit n     -> Numerics.Int_8.to_pretty_string n
@@ -285,8 +298,8 @@ open Source
 
 (* Identifiers *)
 
-let anon_id sort at = "anon-" ^ sort ^ "-" ^ string_of_pos at.left
-let is_anon_id id = Lib.String.chop_prefix "anon-" id.it <> None
+let anon_id sort at = "@anon-" ^ sort ^ "-" ^ string_of_pos at.left
+let is_anon_id id = Lib.String.chop_prefix "@anon-" id.it <> None
 
 (* Types & Scopes *)
 
@@ -306,13 +319,13 @@ let scopeT at =
 
 (* Expressions *)
 
-let asyncE tbs e =
-  AsyncE (tbs, e) @? e.at
+let asyncE sort tbs e =
+  AsyncE (sort, tbs, e) @? e.at
 
 let ignore_asyncE tbs e =
   IgnoreE (
-    AnnotE (AsyncE (tbs, e) @? e.at,
-      AsyncT (scopeT e.at, TupT [] @! e.at) @! e.at) @? e.at ) @? e.at
+    AnnotE (AsyncE (Type.Fut, tbs, e) @? e.at,
+      AsyncT (Type.Fut, scopeT e.at, TupT [] @! e.at) @! e.at) @? e.at ) @? e.at
 
 let is_asyncE e =
   match e.it with
@@ -322,7 +335,7 @@ let is_asyncE e =
 let is_ignore_asyncE e =
   match e.it with
   | IgnoreE
-      {it = AnnotE ({it = AsyncE _; _},
-        {it = AsyncT (_, {it = TupT []; _}); _}); _} ->
+      {it = AnnotE ({it = AsyncE (Type.Fut, _, _); _},
+        {it = AsyncT (Type.Fut, _, {it = TupT []; _}); _}); _} ->
     true
   | _ -> false

@@ -1,8 +1,8 @@
 {
-open Mo_def.Trivia
+open Trivia
 open Source_token
 open Lexer_lib
-module Utf8 = Wasm.Utf8
+module Utf8 = Lib.Utf8
 
 let region lexbuf =
   let left = convert_pos (Lexing.lexeme_start_p lexbuf) in
@@ -49,6 +49,7 @@ let text lexbuf s =
   let b = Buffer.create (String.length s) in
   let i = ref 1 in
   while !i < String.length s - 1 do
+    if s.[!i] = '\n' then Lexing.new_line lexbuf;
     let bs = codepoint lexbuf s i in
     Buffer.add_substring b bs 0 (String.length bs)
   done;
@@ -61,7 +62,7 @@ let char lexbuf s =
     | [n] -> n
     | [] -> error lexbuf "empty character literal"
     | _ -> error lexbuf "overlong character literal"
-  with Wasm.Utf8.Utf8 ->
+  with Lib.Utf8.Utf8 ->
     error lexbuf "invalid utf8 in character literal"
 }
 
@@ -98,6 +99,7 @@ let character =
   | byte
   | '\\'escape
   | "\\u{" hexnum '}'
+  | '\n'
 
 let nat = num | "0x" hexnum
 let frac = num
@@ -139,6 +141,7 @@ rule token mode = parse
   | "**" { POWOP }
   | "&" { ANDOP }
   | "|" { OROP }
+  | "|>" { PIPE }
   | "^" { XOROP }
   | "<<" { SHLOP }
   | "<<>" { ROTLOP }
@@ -181,7 +184,7 @@ rule token mode = parse
   | float as s { FLOAT s }
   | char as s { CHAR (char lexbuf s) }
   | text as s { TEXT (text lexbuf s) }
-  | '"'character*('\n'|eof)
+  | '"'character*eof
     { error lexbuf "unclosed text literal" }
   | '"'character*['\x00'-'\x09''\x0b'-'\x1f''\x7f']
     { error lexbuf "illegal control character in text literal" }
@@ -191,27 +194,37 @@ rule token mode = parse
   (* If you add keywords, please also update
      - src/idllib/escape.ml
      - emacs/motoko-mode.el
+     - src/gen-grammar/grammar.sed
   *)
   | "actor" { ACTOR }
   | "and" { AND }
   | "async" { ASYNC }
+  | "async*" { ASYNCSTAR }
   | "assert" { ASSERT }
   | "await" { AWAIT }
+  | "await*" { AWAITSTAR }
   | "break" { BREAK }
   | "case" { CASE }
   | "catch" { CATCH }
   | "class" { CLASS }
+  | "composite" { COMPOSITE }
   | "continue" { CONTINUE }
   | "debug" { DEBUG }
+  | "debug_show" { DEBUG_SHOW }
   | "do" { DO }
   | "else" { ELSE }
   | "false" { BOOL false }
+  | "finally" { FINALLY }
   | "flexible" { FLEXIBLE }
   | "for" { FOR }
+  | "from_candid" { FROM_CANDID }
   | "func" { FUNC }
   | "if" { IF }
   | "ignore" { IGNORE }
   | "in" { IN }
+  | "invariant" as s { if mode.verification then INVARIANT else ID s }
+  | "implies" as s { if mode.verification then IMPLIES else ID s }
+  | "old" as s { if mode.verification then OLD else ID s }
   | "import" { IMPORT }
   | "module" { MODULE }
   | "not" { NOT }
@@ -221,21 +234,24 @@ rule token mode = parse
   | "label" { LABEL }
   | "let" { LET }
   | "loop" { LOOP }
+  | "persistent" { PERSISTENT}
   | "private" { PRIVATE }
   | "public" { PUBLIC }
+  | "query" { QUERY }
   | "return" { RETURN }
   | "shared" { SHARED }
   | "stable" { STABLE }
+  | "switch" { SWITCH }
   | "system" { SYSTEM }
+  | "transient" { TRANSIENT }
   | "try" { TRY }
   | "throw" { THROW }
-  | "debug_show" { DEBUG_SHOW }
-  | "query" { QUERY }
-  | "switch" { SWITCH }
+  | "to_candid" { TO_CANDID }
   | "true" { BOOL true }
   | "type" { TYPE }
   | "var" { VAR }
   | "while" { WHILE }
+  | "with" { WITH }
 
   | "prim" as s { if mode.privileged then PRIM else ID s }
   | id as s { ID s }

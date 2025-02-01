@@ -7,3 +7,5 @@ let rec is_irrefutable p = match p.it with
   | WildP | VarP _ -> true
   | TagP _ | LitP _ | OptP _ -> false
 
+let is_irrefutable_nonbinding p =
+  is_irrefutable p && Freevars.(M.is_empty (pat p))

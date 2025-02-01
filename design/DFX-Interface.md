@@ -1,8 +1,8 @@
 Stable CLI for dfx
 ==================
 
-An important way of using the Motoko compiler is via the the `dfx` tool,
-provided by the DFINITY SDK, which provides project and package management
+An important way of using the Motoko compiler is via the the `dfx` command,
+provided by the [IC SDK](https://internetcomputer.org/docs/current/developer-docs/setup/install), which provides project and package management
 support.
 
 This document describes the interface that `moc` and related tools provide to
@@ -14,7 +14,7 @@ This document describes the interface that `moc` and related tools provide to
    this document.)
 
 This interface includes:
- * nix derivations imported by SDK
+ * nix derivations imported by the IC SDK
  * binaries executed
  * command line arguments and environment variables passed to these binaries
  * where these binaries read files and
@@ -48,13 +48,14 @@ Compiling Motoko Files to Wasm
 ------------------------------
 
 In order to compile a Motoko file, `dfx` invokes `moc` with
-
-    moc some/path/input.mo            \
-        -o another/path/output.wasm   \
-        { --package pkgname pkgpath } \
-        { --actor-alias alias url }
-        [ --actor-idl actorpath ]
-
+```
+moc some/path/input.mo            \
+    -o another/path/output.wasm   \
+    { --package pkgname pkgpath } \
+    { --actor-alias alias url }   \
+    [ --actor-idl actorpath ]     \
+    { --public-metadata name }
+```
 This _reads_ the following files
  * `some/path/input.mo`
  * any `.mo` file referenced by `some/path/input.mo`, either relatively, absolutely or via the provided package aliases
@@ -68,16 +69,6 @@ This _writes_ to `another/path/output.wasm`, but has no other effect. It does
 not create `another/path/`.
 
 Compiler warnings and errors are reported to `stderr`. Nothing writes to `stdout`.
-
-Compiling Motoko Files to IDL
------------------------------
-
-As the previous point, but passing `--idl` to `moc`, generating the `output.wasm` and
-an additional `output.did` file (in the same directory).
-
-The IDL generation does not issue any warnings.
-
-Compilation and `.did` generation can (optionally) be combined in a single step.
 
 Resolving Canister aliases
 --------------------------
@@ -101,33 +92,63 @@ This file informs Motoko about the interface of that canister. It could be the o
 
 Open problem: how to resolve mutual canister imports.
 
-Compiling IDL Files to JS
--------------------------
+Exporting Canister Metadata
+---------------------------
 
-In order to compile an IDL file, `dfx` invokes `didc` with
+The compiler generates various metadata about the canister via command line flags.
+The compiled Wasm module also includes these metadata in the custom sections.
+The compiler flag `--public-metadata <name>` controls if the custom section is publicly accessible.
+If `<name>` is in the `public-metadata` flag, the custom section name will be `icp:public <name>`.
+Otherwise, it will be `icp:private <name>`. The `--public-metadata` flag applies to the imported actor classes as well.
+In case the emission of a certain metadata section is not desired (e.g. to suppress discoverability, or to make the build
+product more reproducible), `--omit-metadata <name>` can be applied to refrain from emitting it. This option should  be
+used only in very specific cases.
 
-    didc --js some/path/input.did -o another/path/output.js
+* Candid interface.
+  + Compiler flag `--idl` generates the Candid interface for the entry actor. The main service
+    is always a service constructor, which contains the initialization arguments for installing the canister.
+  + Custom section `candid:service` stores the interface for the running (initialized) canister, which removes
+    the initialization arguments.
+  + Custom section `candid:args` stores the initialization arguments. The argument types can refer to
+    types defined in the `candid:service` custom section.
+* Stable variable.
+  + Compiler flag `--stable-types` generates the signatures for stable variables for the entry actor.
+  + Custom section `motoko:stable-types` stores the signatures for stable variables.
 
-This _reads_ `some/path/input.did` and any `.did` file referenced by
-`some/path/input.did`.
+The above metadata is stored in the Wasm module, and is only accessible by the controllers of the canister, unless the
+metadata name is specified in the `--public-metadata` flag.
 
-No constraints are imposed where these imported files reside (this may be refined to prevent relative imports from looking outside the project and the declared packages)
+Moreover, the compiler generates a special marker custom section `"enhanced-orthogonal-persistence"` if the new orthogonal 
+persistence support is enabled, see [Orthogonal Persistence](OrthogonalPersistence.md). This section is always private and
+always emited independent of the compiler flags `--public-metadata` or `--public-metadata`.
 
-This _writes_ to `another/path/output.js`, but has no other effect. It does
-not create `another/path/`.
+Checking stable type compatibility
+----------------------------------
 
-Compiler warnings and errors are reported to `stderr`. Nothing writes to `stdout`.
+The command
+```
+moc --stable-compatible old.most new.most
+```
+checks if the stable interface can evolve from `old.most` to `new.most` in
+a type safe way without unintentional data loss.
+
+If the check succeeds, nothing will be printed. 
+If the check fails, the error message will be printed in stderr and the command returns with exit code 1.
+The check can also emit warning messages, e.g. if stable variables are dropped.
+
+With [enhanced orthogonal persistence](OrthogonalPersistence.md), the stable compatibility is also integrated in the runtime
+system, to atomically guarantee memory compatibility during an upgrade.
 
 Invoking the IDE
 ----------------
 
 In order to start the language server, `dfx` invokes
-
-    mo-ide --canister-main some/path/main.mo \
-        { --package pkgname pkgpath }        \
-        { --actor-alias alias url }
-        [ --actor-idl actorpath ]
-
+```
+mo-ide --canister-main some/path/main.mo \
+    { --package pkgname pkgpath }        \
+    { --actor-alias alias url }          \
+    [ --actor-idl actorpath ]
+```
 with `stdin` and `stdout` connected to the LSP client.
 
 This may _read_ the same files as `moc` would.
@@ -136,21 +157,21 @@ Listing dependencies
 --------------------
 
 The command
-
-    moc --print-deps some/path/input.mo
-
+```
+moc --print-deps some/path/input.mo
+```
 prints to the standard output all URLs _directly_ imported by
 `some/path/input.mo`, one per line. Each line outputs the original
 URL, and optionally a full path if `moc` can resolve the URL, separated by a space.
 For example,
-
-    mo:base/List
-    mo:other_package/Some/Module
-    ic:em77e-bvlzu-aq
-    canister:alias
-    ./local_import some/path/local_import.mo
-    ./runtime some/path/runtime.wasm
-
+```
+mo:base/List
+mo:other_package/Some/Module
+ic:em77e-bvlzu-aq
+canister:alias
+./local_import some/path/local_import.mo
+./runtime some/path/runtime.wasm
+```
 This _reads_ only `some/path/input.mo`, and writes no files.
 
 By transitively exploring the dependency graph using this command (and
@@ -162,11 +183,11 @@ Generating documentation
 ------------------------
 
 In order to generate documentation for a given Motoko package `dfx` invokes
-
-    mo-doc
-        [ --source source_dir ]
-        [ --output output_dir ]
-        [ --format html|adoc ]
-
+```
+mo-doc
+    [ --source source_dir ]
+    [ --output output_dir ]
+    [ --format html|adoc ]
+```
 The default source directory is `src`, the default output is `docs`, and the default format is `html`.
 `mo-doc` will then generate documentation in the output directory mirroring the directory/file structure of the source directory.

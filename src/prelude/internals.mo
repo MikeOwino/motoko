@@ -9,14 +9,16 @@ code, and cannot be shadowed.
 
 type @Iter<T_> = {next : () -> ?T_};
 
-var @cycles : Nat64 = 0;
+var @cycles : Nat = 0;
 
 // Function called by backend to add funds to call.
 // DO NOT RENAME without modifying compilation.
-func @add_cycles() {
+func @add_cycles<system>() {
   let cycles = @cycles;
   @reset_cycles();
-  (prim "cyclesAdd" : (Nat64) -> ()) (cycles);
+  if (cycles != 0) {
+    (prim "cyclesAdd" : Nat -> ()) cycles;
+  }
 };
 
 // Function called by backend to zero cycles on context switch.
@@ -282,10 +284,15 @@ func @equal_array<T>(eq : (T, T) -> Bool, a : [T], b : [T]) : Bool {
   return true;
 };
 
+type @CleanCont = () -> ();
+type @BailCont = @CleanCont;
 type @Cont<T> = T -> () ;
-type @Async<T> = (@Cont<T>,@Cont<Error>) -> ?(() -> ());
+type @Async<T> = (@Cont<T>, @Cont<Error>, @BailCont) -> {
+  #suspend;
+  #schedule : () -> ();
+};
 
-type @Refund = Nat64;
+type @Refund = Nat;
 type @Result<T> = {#ok : (refund : @Refund, value: T); #error : Error};
 
 type @Waiter<T> = (@Refund,T) -> () ;
@@ -299,20 +306,25 @@ func @reset_refund() {
 };
 
 func @getSystemRefund() : @Refund {
-  return (prim "cyclesRefunded" : () -> Nat64) ();
+  return (prim "cyclesRefunded" : () -> Nat) ();
 };
 
-func @new_async<T <: Any>() : (@Async<T>, @Cont<T>, @Cont<Error>) {
+// trivial cleanup action
+func @cleanup() {
+};
+
+func @new_async<T <: Any>() : (@Async<T>, @Cont<T>, @Cont<Error>, @CleanCont) {
   let w_null = func(r : @Refund, t : T) { };
   let r_null = func(_ : Error) {};
   var result : ?(@Result<T>) = null;
   var ws : @Waiter<T> = w_null;
   var rs : @Cont<Error> = r_null;
+  let getRefund = @cycles != 0;
 
   func fulfill(t : T) {
     switch result {
       case null {
-        let refund = @getSystemRefund();
+        let refund = if getRefund @getSystemRefund() else 0;
         result := ?(#ok (refund, t));
         let ws_ = ws;
         ws := w_null;
@@ -336,7 +348,17 @@ func @new_async<T <: Any>() : (@Async<T>, @Cont<T>, @Cont<Error>) {
     };
   };
 
-  func enqueue(k : @Cont<T>, r : @Cont<Error>) : ?(() -> ()) {
+  var cleanup : @BailCont = @cleanup;
+
+  func clean() {
+      cleanup();
+  };
+
+  func enqueue(k : @Cont<T>, r : @Cont<Error>, b : @BailCont) : {
+    #suspend;
+    #schedule : () -> ();
+  } {
+    cleanup := b;
     switch result {
       case null {
         let ws_ = ws;
@@ -351,58 +373,326 @@ func @new_async<T <: Any>() : (@Async<T>, @Cont<T>, @Cont<Error>) {
           rs_(e);
           @reset_cycles();
           @reset_refund();
-          r(e) };
-	  null
+          r(e)
+        };
+        #suspend
       };
       case (? (#ok (r, t))) {
-        ? (func () { @refund := r; k(t) });
+        #schedule (func () { @refund := r; k(t) });
       };
       case (? (#error e)) {
-        ? (func () { r(e) });
+        #schedule (func () { r(e) });
       };
     };
   };
 
-  (enqueue, fulfill, fail)
+  (enqueue, fulfill, fail, clean)
 };
 
 // Subset of IC management canister interface required for our use
 module @ManagementCanister = {
   public type wasm_module = Blob;
   public type canister_settings = {
-    controller : ?Principal;
+    controllers : ?[Principal];
     compute_allocation: ?Nat;
     memory_allocation: ?Nat;
     freezing_threshold: ?Nat;
   };
 };
 
+type @WasmMemoryPersistence = {
+  #keep;
+  #replace;
+};
+
+type @UpgradeOptions = {
+  wasm_memory_persistence: ?@WasmMemoryPersistence;
+};
+
 let @ic00 = actor "aaaaa-aa" :
   actor {
     create_canister : {
-      settings : ?@ManagementCanister.canister_settings
+      settings : ?@ManagementCanister.canister_settings;
+      sender_canister_version : ?Nat64
     } -> async { canister_id : Principal };
     install_code : {
-      mode : { #install; #reinstall; #upgrade };
+      mode : {
+        #install;
+        #reinstall;
+        #upgrade : ?@UpgradeOptions;
+      };
       canister_id : Principal;
       wasm_module : @ManagementCanister.wasm_module;
       arg : Blob;
+      sender_canister_version : ?Nat64;
     } -> async ()
  };
 
+func @install_actor_helper(
+    install_arg: {
+      #new : { settings : ?@ManagementCanister.canister_settings } ;
+      #install : Principal;
+      #reinstall : actor {} ;
+      #upgrade : actor {} ;
+      #upgrade_with_persistence : { wasm_memory_persistence: @WasmMemoryPersistence; canister: actor {} };
+    },
+    enhanced_orthogonal_persistence : Bool,
+    wasm_module : Blob,
+    arg : Blob,
+    )
+  : async* Principal = async* {
+  let (mode, canister_id) =
+    switch install_arg {
+      case (#new settings) {
+        let available = (prim "cyclesAvailable" : () -> Nat) ();
+        let accepted = (prim "cyclesAccept" : Nat -> Nat) available;
+        let sender_canister_version = ?(prim "canister_version" : () -> Nat64)();
+        @cycles += accepted;
+        let { canister_id } =
+          await @ic00.create_canister { settings with sender_canister_version };
+        (#install, canister_id)
+      };
+      case (#install principal1) {
+        (#install, principal1)
+      };
+      case (#reinstall actor1) {
+        (#reinstall, (prim "principalOfActor" : (actor {}) -> Principal) actor1)
+      };
+      case (#upgrade actor2) {
+        let wasm_memory_persistence = if enhanced_orthogonal_persistence {
+          ?(#keep)
+        } else {
+          null
+        };
+        let upgradeOptions = {
+          wasm_memory_persistence;
+        };
+        ((#upgrade (?upgradeOptions)), (prim "principalOfActor" : (actor {}) -> Principal) actor2)
+      };
+      case (#upgrade_with_persistence { wasm_memory_persistence; canister } ) {
+        let upgradeOptions = { wasm_memory_persistence = ?wasm_memory_persistence };
+        ((#upgrade (?upgradeOptions)), (prim "principalOfActor" : (actor {}) -> Principal) canister)
+      };
+    };
+  await @ic00.install_code {
+    mode;
+    canister_id;
+    wasm_module;
+    arg;
+    sender_canister_version = ?(prim "canister_version" : () -> Nat64)();
+  };
+  return canister_id;
+};
+
 // It would be desirable if create_actor_helper can be defined
 // without paying the extra self-remote-call-cost
-func @create_actor_helper(wasm_module_ : Blob, arg_ : Blob) : async Principal = async {
-  let available = (prim "cyclesAvailable" : () -> Nat64) ();
-  let accepted = (prim "cyclesAccept" : Nat64 -> Nat64) (available);
+// TODO: This helper is now only used by Prim.createActor and could be removed, except
+// that Prim.createActor was mentioned on the forum and might be in use. (#3420)
+func @create_actor_helper(wasm_module : Blob, arg : Blob) : async Principal = async {
+  let available = (prim "cyclesAvailable" : () -> Nat) ();
+  let accepted = (prim "cyclesAccept" : Nat -> Nat) (available);
+  let sender_canister_version = ?(prim "canister_version" : () -> Nat64)();
   @cycles += accepted;
-  let { canister_id = canister_id_ } =
-    await @ic00.create_canister({settings = null});
-  await @ic00.install_code({
+  let { canister_id } =
+    await @ic00.create_canister { settings = null; sender_canister_version };
+  await @ic00.install_code {
     mode = #install;
-    canister_id = canister_id_;
-    wasm_module = wasm_module_;
-    arg = arg_;
-  });
-  return canister_id_;
+    canister_id;
+    wasm_module;
+    arg;
+    sender_canister_version = ?(prim "canister_version" : () -> Nat64)();
+  };
+  return canister_id;
 };
+
+// raw calls
+func @call_raw(p : Principal, m : Text, a : Blob) : async Blob {
+  let available = (prim "cyclesAvailable" : () -> Nat) ();
+  if (available != 0) {
+    @cycles := (prim "cyclesAccept" : Nat -> Nat) available;
+  };
+  await (prim "call_raw" : (Principal, Text, Blob) -> async Blob) (p, m, a);
+};
+
+
+// helpers for reifying ic0.call_perform failures as errors
+func @call_succeeded() : Bool {
+  (prim "call_perform_status" : () -> Nat32) () == 0;
+};
+
+func @call_error() : Error {
+  let status = (prim "call_perform_status" : () -> Nat32) ();
+  let message = (prim "call_perform_message" : () -> Text) ();
+  let code = #call_error({err_code = status});
+  (prim "cast" : ({#call_error : {err_code : Nat32}}, Text) -> Error)
+    (code, message)
+};
+
+
+// default timer mechanism implementation
+// fundamental node invariant: max_exp pre <= expire <= min_exp post
+// corollary: if expire == 0 then the pre is completely expired
+//
+// Note: Below the `expire` field is an encoding of an aliased mutable field with
+//       a single-element mutable array. It eliminates `--experimental-field-aliasing`
+//       while compiling this file at the cost of slightly higher syntactic noise
+//       as well as increased allocation and runtime cost accessing the data. Oh well.
+//
+type @Node = { expire : [var Nat64]; id : Nat; delay : ?Nat64; job : () -> async (); pre : ?@Node; post : ?@Node };
+
+var @timers : ?@Node = null;
+
+func @prune(n : ?@Node) : ?@Node = switch n {
+  case null null;
+  case (?n) {
+    if (n.expire[0] == 0) {
+      @prune(n.post) // by corollary
+    } else {
+      ?{ n with pre = @prune(n.pre) }
+    }
+  }
+};
+
+func @nextExpiration(n : ?@Node) : Nat64 = switch n {
+  case null 0;
+  case (?n) {
+    var exp = @nextExpiration(n.pre); // TODO: use the corollary for expire == 0
+    if (exp == 0) {
+      exp := n.expire[0];
+      if (exp == 0) {
+        exp := @nextExpiration(n.post)
+      }
+    };
+    exp
+  }
+};
+
+// Function called by backend to run eligible timed actions.
+// DO NOT RENAME without modifying compilation.
+func @timer_helper() : async () {
+  func Array_init<T>(len : Nat,  x : T) : [var T] {
+    (prim "Array.init" : <T>(Nat, T) -> [var T])<T>(len, x)
+  };
+
+  let now = (prim "time" : () -> Nat64)();
+
+  var gathered = 0;
+  let thunks = Array_init<?(() -> async ())>(10, null); // we want max 10
+
+  func gatherExpired(n : ?@Node) = switch n {
+    case null ();
+    case (?n) {
+      gatherExpired(n.pre);
+      if (n.expire[0] > 0 and n.expire[0] <= now and gathered < thunks.size()) {
+        thunks[gathered] := ?(n.job);
+        switch (n.delay) {
+          case (null or ?0) ();
+          case (?delay) {
+            // re-add the node, skipping past expirations
+            let expire = n.expire[0] + delay * (1 + (now - n.expire[0]) / delay);
+            n.expire[0] := 0;
+            // N.B. reinsert only works on pruned nodes
+            func reinsert(m : ?@Node) : @Node = switch m {
+              case null ({ n with expire = [var expire]; pre = null; post = null });
+              case (?m) {
+                assert m.expire[0] != 0;
+                if (expire < m.expire[0]) ({ m with pre = ?reinsert(m.pre) })
+                else ({ m with post = ?reinsert(m.post) })
+              }
+            };
+            @timers := ?reinsert(@prune(@timers));
+          };
+        };
+        n.expire[0] := 0;
+        gathered += 1;
+      };
+      gatherExpired(n.post);
+    }
+  };
+
+  gatherExpired(@timers);
+
+  let exp = @nextExpiration @timers;
+  ignore (prim "global_timer_set" : Nat64 -> Nat64) exp;
+  if (exp == 0) @timers := null;
+
+  var failed : Nat64 = 0;
+  func reinsert(job : () -> async ()) {
+    if (failed == 0) {
+      @timers := @prune @timers;
+      ignore (prim "global_timer_set" : Nat64 -> Nat64) 1
+    };
+    failed += 1;
+    @timers := ?(switch @timers {
+      case (?{ id = 0; pre; post; job = j; expire; delay })
+        // push top node's contents into pre
+        ({ expire = [var failed]; id = 0; delay; job; post
+         ; pre = ?{ id = 0; expire; pre; post = null; delay; job = j } });
+      case _ ({ expire = [var failed]; id = 0; delay = null; job; pre = null; post = @timers })
+    })
+  };
+
+  for (o in thunks.vals()) {
+    switch o {
+      case (?thunk) try ignore thunk() catch _ reinsert thunk;
+      case _ return
+    }
+  }
+};
+
+var @lastTimerId = 0;
+
+func @setTimer<system>(delayNanos : Nat64, recurring : Bool, job : () -> async ()) : (id : Nat) {
+  @lastTimerId += 1;
+  let id = @lastTimerId;
+  let now = (prim "time" : () -> Nat64) ();
+  let expire = now + delayNanos;
+  let delay = if recurring ?delayNanos else null;
+  // only works on pruned nodes
+  func insert(n : ?@Node) : @Node =
+    switch n {
+      case null ({ expire = [var expire]; id; delay; job; pre = null; post = null });
+      case (?n) {
+        assert n.expire[0] != 0;
+        if (expire < n.expire[0]) ({ n with pre = ?insert(n.pre) })
+        else ({ n with post = ?insert(n.post) })
+      }
+    };
+  @timers := ?insert(@prune(@timers));
+
+  let exp = @nextExpiration @timers;
+  if (exp == 0) @timers := null;
+  ignore (prim "global_timer_set" : Nat64 -> Nat64) exp;
+
+  id
+};
+
+func @cancelTimer(id : Nat) {
+  func graft(onto : ?@Node, branch : ?@Node) : ?@Node = switch (onto, branch) {
+    case (null, null) null;
+    case (null, _) branch;
+    case (_, null) onto;
+    case (?onto, _) { ?{ onto with post = graft(onto.post, branch) } }
+  };
+
+  func hunt(n : ?@Node) : ?@Node = switch n {
+    case null n;
+    case (?{ id = node; pre; post }) {
+      if (node == id) {
+        graft(pre, post)
+      } else do? {
+        { n! with pre = hunt pre; post = hunt post }
+      }
+    }
+  };
+
+  @timers := hunt @timers;
+
+  if (@nextExpiration @timers == 0) {
+    // no more expirations ahead
+    ignore (prim "global_timer_set" : Nat64 -> Nat64) 0;
+    @timers := null
+  }
+};
+
+func @set_global_timer(time : Nat64) = ignore (prim "global_timer_set" : Nat64 -> Nat64) time;

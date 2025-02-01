@@ -1,4 +1,4 @@
-open Mo_def.Trivia
+open Trivia
 
 type token =
   | EOF
@@ -12,7 +12,9 @@ type token =
   | LCURLY
   | RCURLY
   | AWAIT
+  | AWAITSTAR
   | ASYNC
+  | ASYNCSTAR
   | BREAK
   | CASE
   | CATCH
@@ -20,6 +22,7 @@ type token =
   | LABEL
   | DEBUG
   | DO
+  | FINALLY
   | FLEXIBLE
   | IF
   | IGNORE
@@ -32,8 +35,10 @@ type token =
   | RETURN
   | SYSTEM
   | STABLE
+  | TRANSIENT
   | TRY
   | THROW
+  | WITH
   | ARROW
   | ASSIGN
   | FUNC
@@ -41,6 +46,7 @@ type token =
   | OBJECT
   | ACTOR
   | CLASS
+  | PERSISTENT
   | PUBLIC
   | PRIVATE
   | SHARED
@@ -54,10 +60,14 @@ type token =
   | BANG
   | AND
   | OR
+  | IMPLIES
+  | OLD
   | NOT
   | IMPORT
   | MODULE
   | DEBUG_SHOW
+  | TO_CANDID
+  | FROM_CANDID
   | ASSERT
   | ADDOP
   | SUBOP
@@ -111,12 +121,15 @@ type token =
   | TEXT of string
   | PRIM
   | UNDERSCORE
+  | COMPOSITE
+  | INVARIANT
   (* Trivia *)
   | LINEFEED of line_feed
   | SINGLESPACE
   | SPACE of int
   | TAB of int (* shudders *)
   | COMMENT of string
+  | PIPE
 
 let to_parser_token :
     token -> (Parser.token, line_feed trivia) result = function
@@ -131,7 +144,9 @@ let to_parser_token :
   | LCURLY -> Ok Parser.LCURLY
   | RCURLY -> Ok Parser.RCURLY
   | AWAIT -> Ok Parser.AWAIT
+  | AWAITSTAR -> Ok Parser.AWAITSTAR
   | ASYNC -> Ok Parser.ASYNC
+  | ASYNCSTAR -> Ok Parser.ASYNCSTAR
   | BREAK -> Ok Parser.BREAK
   | CASE -> Ok Parser.CASE
   | CATCH -> Ok Parser.CATCH
@@ -149,8 +164,11 @@ let to_parser_token :
   | WHILE -> Ok Parser.WHILE
   | FOR -> Ok Parser.FOR
   | RETURN -> Ok Parser.RETURN
+  | TRANSIENT -> Ok Parser.TRANSIENT
   | TRY -> Ok Parser.TRY
   | THROW -> Ok Parser.THROW
+  | FINALLY -> Ok Parser.FINALLY
+  | WITH -> Ok Parser.WITH
   | ARROW -> Ok Parser.ARROW
   | ASSIGN -> Ok Parser.ASSIGN
   | FUNC -> Ok Parser.FUNC
@@ -158,6 +176,7 @@ let to_parser_token :
   | OBJECT -> Ok Parser.OBJECT
   | ACTOR -> Ok Parser.ACTOR
   | CLASS -> Ok Parser.CLASS
+  | PERSISTENT -> Ok Parser.PERSISTENT
   | PUBLIC -> Ok Parser.PUBLIC
   | PRIVATE -> Ok Parser.PRIVATE
   | SHARED -> Ok Parser.SHARED
@@ -173,10 +192,14 @@ let to_parser_token :
   | BANG -> Ok Parser.BANG
   | AND -> Ok Parser.AND
   | OR -> Ok Parser.OR
+  | IMPLIES -> Ok Parser.IMPLIES
+  | OLD -> Ok Parser.OLD
   | NOT -> Ok Parser.NOT
   | IMPORT -> Ok Parser.IMPORT
   | MODULE -> Ok Parser.MODULE
   | DEBUG_SHOW -> Ok Parser.DEBUG_SHOW
+  | TO_CANDID -> Ok Parser.TO_CANDID
+  | FROM_CANDID -> Ok Parser.FROM_CANDID
   | ASSERT -> Ok Parser.ASSERT
   | ADDOP -> Ok Parser.ADDOP
   | SUBOP -> Ok Parser.SUBOP
@@ -230,6 +253,9 @@ let to_parser_token :
   | TEXT s -> Ok (Parser.TEXT s)
   | PRIM -> Ok Parser.PRIM
   | UNDERSCORE -> Ok Parser.UNDERSCORE
+  | COMPOSITE -> Ok Parser.COMPOSITE
+  | INVARIANT -> Ok Parser.INVARIANT
+  | PIPE -> Ok Parser.PIPE
   (*Trivia *)
   | SINGLESPACE -> Error (Space 1)
   | SPACE n -> Error (Space n)
@@ -249,7 +275,9 @@ let string_of_parser_token = function
   | Parser.LCURLY -> "LCURLY"
   | Parser.RCURLY -> "RCURLY"
   | Parser.AWAIT -> "AWAIT"
+  | Parser.AWAITSTAR -> "AWAIT*"
   | Parser.ASYNC -> "ASYNC"
+  | Parser.ASYNCSTAR -> "ASYNC*"
   | Parser.BREAK -> "BREAK"
   | Parser.CASE -> "CASE"
   | Parser.CATCH -> "CATCH"
@@ -269,6 +297,8 @@ let string_of_parser_token = function
   | Parser.RETURN -> "RETURN"
   | Parser.TRY -> "TRY"
   | Parser.THROW -> "THROW"
+  | Parser.FINALLY -> "FINALLY"
+  | Parser.WITH -> "WITH"
   | Parser.ARROW -> "ARROW"
   | Parser.ASSIGN -> "ASSIGN"
   | Parser.FUNC -> "FUNC"
@@ -276,11 +306,13 @@ let string_of_parser_token = function
   | Parser.OBJECT -> "OBJECT"
   | Parser.ACTOR -> "ACTOR"
   | Parser.CLASS -> "CLASS"
+  | Parser.PERSISTENT -> "PERSISTENT"
   | Parser.PUBLIC -> "PUBLIC"
   | Parser.PRIVATE -> "PRIVATE"
   | Parser.SHARED -> "SHARED"
   | Parser.STABLE -> "STABLE"
   | Parser.SYSTEM -> "SYSTEM"
+  | Parser.TRANSIENT -> "TRANSIENT"
   | Parser.QUERY -> "QUERY"
   | Parser.SEMICOLON -> "SEMICOLON"
   | Parser.SEMICOLON_EOL -> "SEMICOLON_EOL"
@@ -296,6 +328,8 @@ let string_of_parser_token = function
   | Parser.IMPORT -> "IMPORT"
   | Parser.MODULE -> "MODULE"
   | Parser.DEBUG_SHOW -> "DEBUG_SHOW"
+  | Parser.TO_CANDID -> "TO_CANDID"
+  | Parser.FROM_CANDID -> "FROM_CANDID"
   | Parser.ASSERT -> "ASSERT"
   | Parser.ADDOP -> "ADDOP"
   | Parser.SUBOP -> "SUBOP"
@@ -352,6 +386,11 @@ let string_of_parser_token = function
   | Parser.TEXT _ -> "TEXT of string"
   | Parser.PRIM -> "PRIM"
   | Parser.UNDERSCORE -> "UNDERSCORE"
+  | Parser.COMPOSITE -> "COMPOSITE"
+  | Parser.INVARIANT -> "INVARIANT"
+  | Parser.IMPLIES -> "IMPLIES"
+  | Parser.OLD -> "OLD"
+  | Parser.PIPE -> "PIPE"
 
 let is_lineless_trivia : token -> void trivia option = function
   | SINGLESPACE -> Some (Space 1)

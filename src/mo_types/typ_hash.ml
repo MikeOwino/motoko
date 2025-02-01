@@ -91,6 +91,7 @@ let prim = function
   | Blob -> "B"
   | Error -> "E"
   | Principal -> "P"
+  | Region -> "R"
 
 let rec go = function
   | Prim p -> ((Nullary, prim p), [])
@@ -123,7 +124,7 @@ let rec go = function
     List.iter (fun bind -> assert (bind.sort = Scope)) tbs;
     ( ( TwoSeq (List.length ts1),
         "F" ^
-        (match s with Local -> "" | Shared Query -> "q" | Shared Write -> "s") ^
+        (match s with Local -> "" | Shared Query -> "q" | Shared Write -> "s" | Shared Composite -> "C") ^
         (match c with Returns -> "" | Promises -> "p" | Replies -> "r")
       )
     , ts1 @ ts2
@@ -178,15 +179,15 @@ let test t expected =
     (Printf.printf "\nExpected:\n  %s\nbut got:\n  %s\n" expected actual; false)
 
 let%test "monolist" =
-  let con = Con.fresh "List" (Abs ([], Pre))  in
+  let con = Cons.fresh "List" (Abs ([], Pre))  in
   let t = Con (con, []) in
-  Con.unsafe_set_kind con (Def ([], Opt (Tup [nat; t])));
+  Cons.unsafe_set_kind con (Def ([], Opt (Tup [nat; t])));
   test t "0=?(N!0)"
 
 let%test "polylist" =
-  let con = Con.fresh "List" (Abs ([], Pre))  in
+  let con = Cons.fresh "List" (Abs ([], Pre))  in
   let bind = { var = "T"; sort = Type; bound = Any } in
   let v = Var ("T", 0) in
-  Con.unsafe_set_kind con (Def ([bind], Opt (Tup [v; Con (con, [v])])));
+  Cons.unsafe_set_kind con (Def ([bind], Opt (Tup [v; Con (con, [v])])));
   let t = Con (con, [nat]) in
   test t "0=?(N!0)"

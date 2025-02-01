@@ -1,6 +1,6 @@
 {-# language OverloadedStrings, DuplicateRecordFields,
   ExplicitForAll, ScopedTypeVariables, BlockArguments,
-  LambdaCase #-}
+  LambdaCase, TypeOperators, ViewPatterns #-}
 
 module Main where
 
@@ -15,9 +15,10 @@ import           Data.Maybe (mapMaybe)
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Language.LSP.Test hiding (message)
-import           Language.LSP.Types (TextDocumentIdentifier(..), Position(..), HoverContents(..), MarkupContent(..), MarkupKind(..), TextEdit(..), Range(..), DidSaveTextDocumentParams(..), SMethod(..), Diagnostic(..), Location(..), Uri(..), filePathToUri, CompletionDoc(..))
-import qualified Language.LSP.Types as LSP
-import           Language.LSP.Types.Lens (contents, label, detail, documentation, message, additionalTextEdits, newText)
+import           Language.LSP.Protocol.Types (TextDocumentIdentifier(..), Position(..), Hover(..), MarkupContent(..), MarkupKind(..), TextEdit(..), Range(..), DidSaveTextDocumentParams(..), Diagnostic(..), Location(..), Uri(..), filePathToUri, CompletionItem(..))
+import           Language.LSP.Protocol.Message (SMethod(..))
+import qualified Language.LSP.Protocol.Types as LSP
+import           Language.LSP.Protocol.Lens (contents, label, detail, documentation, message, additionalTextEdits, newText)
 import           System.Directory (setCurrentDirectory, makeAbsolute, removeFile)
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure)
@@ -34,7 +35,8 @@ completionTestCase
   -> Session ()
 completionTestCase doc pos pred = do
   actual <- getCompletions doc pos
-  let unCompletionDoc (CompletionDocMarkup t) = unMarkup t
+  -- let unCompletionDoc (CompletionItem {_documentation = t}) = unMarkup t
+  let unCompletionDoc (Just -> t) = unMarkup t
   liftIO (pred (map (\c -> (c^.label, c^.detail, fmap unCompletionDoc (c^.documentation))) actual))
 
 hoverTestCase
@@ -44,11 +46,11 @@ hoverTestCase
   -> Session ()
 hoverTestCase doc pos expected = do
   actual <- getHover doc pos
-  case fmap (^.contents) actual of
+  case (^.contents) <$> actual of
     Nothing
       | expected == Nothing ->
         pure ()
-    Just (HoverContents (MarkupContent { _value = content}))
+    Just (LSP.InL MarkupContent { _value = content })
       | Just expected' <- expected ->
         if Text.isInfixOf expected' content
           then pure ()
@@ -74,7 +76,9 @@ definitionsTestCase
 definitionsTestCase project doc pos expected = do
   LSP.InL response <- getDefinitions doc pos
   let expected' = map (first (filePathToUri . (project </>))) expected
-  let actual = map (\(Location uri range) -> (uri, range)) response
+  let locations (LSP.Definition (LSP.InL loc)) = [loc]
+      locations (LSP.Definition (LSP.InR locs)) = locs
+  let actual = map (\(Location uri range) -> (uri, range)) (locations response)
   liftIO (shouldMatchList actual expected')
 
 -- | Discards all empty diagnostic reports (as those are merely used
@@ -92,16 +96,21 @@ withDoc path action = do
   closeDoc doc
   pure res
 
-plainMarkup :: Text -> Maybe HoverContents
+plainMarkup :: Text -> Maybe Hover
 plainMarkup t =
   Just
-    (HoverContents MarkupContent
-      { _kind = MkPlainText
-      , _value = t
-      })
+    (Hover {
+      _contents = LSP.InL MarkupContent
+       { _kind = MarkupKind_PlainText
+       , _value = t
+       },
+      _range = Nothing
+    })
 
-unMarkup :: MarkupContent -> Text
-unMarkup (MarkupContent { _kind = MkMarkdown, _value = t}) = t
+unMarkup :: Maybe (Text LSP.|? MarkupContent) -> Text
+unMarkup Nothing = ""
+unMarkup (Just (LSP.InL t)) = t
+unMarkup (Just (LSP.InR (MarkupContent { _kind = MarkupKind_Markdown, _value = t}))) = t
 
 expectationFailure :: String -> Expectation
 expectationFailure = Test.HUnit.assertFailure
@@ -158,7 +167,7 @@ main = do
           hoverTestCase
             doc
             (Position 17 11)
-            (Just "pop : <T>(List<T>) -> (?T, List<T>)")
+            (Just "pop : <T>List<T> -> (?T, List<T>)")
           hoverTestCase
             doc
             (Position 50 50)
@@ -176,15 +185,43 @@ main = do
           definitionsTestCase
             project
             doc
-            (Position 6 25)
+            (Position 7 25)
             [("lib/list.mo", Range (Position 31 14) (Position 31 17))]
 
           log "Definition for a Class"
           definitionsTestCase
             project
             doc
-            (Position 5 31)
+            (Position 6 31)
             [("mydependency/lib.mo", Range (Position 5 17) (Position 5 24))]
+
+          log "Definition for a function via an explicit field import"
+          definitionsTestCase
+            project
+            doc
+            (Position 8 15)
+            [("lib/list.mo", Range (Position 56 14) (Position 56 18))]
+          
+          log "Definition for an imported module alias"
+          definitionsTestCase
+            project
+            doc
+            (Position 1 7)
+            [("lib/list.mo", Range (Position 0 0) (Position 0 0))]
+          
+          log "Definition for an imported field"
+          definitionsTestCase
+            project
+            doc
+            (Position 2 9)
+            [("lib/list.mo", Range (Position 31 14) (Position 31 17))]
+          
+          log "Definition for an imported field alias"
+          definitionsTestCase
+            project
+            doc
+            (Position 2 21)
+            [("lib/list.mo", Range (Position 56 14) (Position 56 18))]
 
         log "Completion tests"
         log "Completing top level definitions"
@@ -224,7 +261,7 @@ main = do
           liftIO do
             shouldBe (actual^.label) "print_hello"
             shouldBe (actual^.detail) (Just "() -> Text (import from \"mo:mydep/lib\")")
-            let Just (LSP.List [importEdit]) = actual^.additionalTextEdits
+            let Just [importEdit] = actual^.additionalTextEdits
             shouldContain (Text.lines (importEdit^.newText)) ["import MyDep \"mo:mydep/lib\";"]
 
         log "Completing on not-yet-imported actors"
@@ -235,7 +272,7 @@ main = do
           liftIO do
             shouldBe (actual^.label) "add_counter"
             shouldBe (actual^.detail) (Just "shared Nat -> () (import from \"canister:counter\")")
-            let Just (LSP.List [importEdit]) = actual^.additionalTextEdits
+            let Just [importEdit] = actual^.additionalTextEdits
             shouldContain (Text.lines (importEdit^.newText)) ["import Counter \"canister:counter\";"]
 
         withDoc "ListClient.mo" \doc -> do
@@ -243,7 +280,7 @@ main = do
           -- ==> 1 | ort List
           let edit = TextEdit (Range (Position 0 1) (Position 0 3)) ""
           _ <- applyEdit doc edit
-          sendNotification STextDocumentDidSave (DidSaveTextDocumentParams doc Nothing)
+          sendNotification SMethod_TextDocumentDidSave (DidSaveTextDocumentParams doc Nothing)
           (diagnostic:_) <- waitForDiagnostics
           liftIO (diagnostic^.message `shouldBe` "unexpected token 'import'")
 
@@ -264,7 +301,7 @@ main = do
           let edit = TextEdit (Range (Position 0 1) (Position 0 3)) ""
           _ <- applyEdit doc edit
           withDoc "app.mo" \appDoc -> do
-            sendNotification STextDocumentDidSave (DidSaveTextDocumentParams appDoc Nothing)
+            sendNotification SMethod_TextDocumentDidSave (DidSaveTextDocumentParams appDoc Nothing)
             diagnostic:_ <- waitForActualDiagnostics
             liftIO (diagnostic^.message `shouldBe` "unexpected token 'import'")
 
@@ -274,7 +311,7 @@ main = do
           -- for completions
           let edit = TextEdit (Range (Position 4 0) (Position 4 0)) "\nimport MyDep \"mo:mydep/broken\""
           _ <- applyEdit doc edit
-          sendNotification STextDocumentDidSave (DidSaveTextDocumentParams doc Nothing)
+          sendNotification SMethod_TextDocumentDidSave (DidSaveTextDocumentParams doc Nothing)
           [diag] <- waitForActualDiagnostics
           liftIO (diag^.message `shouldBe` "operator is not defined for operand types\n  Text\nand\n  Nat")
 
@@ -283,7 +320,7 @@ main = do
           -- Imports the non-broken dependency module
           let edit = TextEdit (Range (Position 4 0) (Position 4 0)) "\nimport MyDep \"mo:mydep/lib\""
           _ <- applyEdit doc edit
-          sendNotification STextDocumentDidSave (DidSaveTextDocumentParams doc Nothing)
+          sendNotification SMethod_TextDocumentDidSave (DidSaveTextDocumentParams doc Nothing)
           let edit2 = TextEdit (Range (Position 5 0) (Position 5 0)) "\nMyDep."
           _ <- applyEdit doc edit2
           completionTestCase
@@ -296,7 +333,7 @@ main = do
         withDoc "app.mo" \doc -> do
           let edit = TextEdit (Range (Position 4 0) (Position 4 0)) "\nimport Doc \"doc_comments\""
           _ <- applyEdit doc edit
-          sendNotification STextDocumentDidSave (DidSaveTextDocumentParams doc Nothing)
+          sendNotification SMethod_TextDocumentDidSave (DidSaveTextDocumentParams doc Nothing)
           let edit2 = TextEdit (Range (Position 5 0) (Position 5 0)) "\nDoc."
           _ <- applyEdit doc edit2
           completionTestCase

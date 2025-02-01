@@ -84,7 +84,7 @@ end
 
 module Seq :
 sig
-  val for_all : ('a -> bool) -> 'a Seq.t -> bool
+  val for_all : ('a -> bool) -> 'a Seq.t -> bool (* 4.14 *)
 end
 
 module Option :
@@ -96,6 +96,8 @@ sig
     val (and+) : 'a option -> 'b option -> ('a * 'b) option
   end
   val get : 'a option -> 'a -> 'a
+  val exists : ('a -> bool) -> 'a option -> bool
+  val map2 : ('a -> 'b -> 'c) -> 'a option -> 'b option -> 'c option
 end
 
 module Promise :
@@ -154,9 +156,11 @@ sig
   val split : string -> char -> string list
   val breakup : string -> int -> string list
   val find_from_opt : (char -> bool) -> string -> int -> int option
+  val starts_with : string -> string -> bool
   val chop_prefix : string -> string -> string option
   val chop_suffix : string -> string -> string option
   val lightweight_escaped : string -> string
+  val levenshtein_distance : string -> string -> int
 end
 
 module CRC :
@@ -180,6 +184,15 @@ module Base32 :
 sig
   val decode : string -> (string, string) result
   val encode : string -> string
+end
+
+module Utf8 :
+sig
+  type t = int list
+  exception Utf8
+  val is_valid : string -> bool
+  val decode : string -> t (* raises Utf8 *)
+  val encode : t -> string (* raises Utf8 *)
 end
 
 module FilePath :

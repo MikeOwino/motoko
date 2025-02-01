@@ -6,7 +6,7 @@ This directory contains the parts of the Motoko runtime implemented in Rust.
 tl;dr
 -----
 
-If you just want to get `mo-rts.wasm` in this directory, run
+If you just want to get RTS wasm files in this directory, run
 
     nix-shell --run 'make -C rts'
 
@@ -15,12 +15,12 @@ from the top-level directory of the Motoko repository.
 Compilation
 -----------
 
-Running `make` should produce `mo-rts.wasm`.
+Running `make` should produce RTS Wasm files (different versions).
 
 If run within `nix-shell`, the environment variables `WASM_CLANG` and `WASM_LD`
 should point to suitable binaries (we track a specific unreleased version of
-`llvm`). If not present, the `Makefile` will try to use `clang-10` and
-`wasm-ld-10`.
+`llvm`). If not present, the `Makefile` will try to use `clang-18` and
+`wasm-ld-18`.
 
 The runtime compiles and links in [libtommath]. It needs the source, so
 `nix-build` and `nix-shell` will set the environment variable `TOMMATHSRC` to
@@ -83,10 +83,24 @@ do step 3.
 
 1. Update Rust version in `nix/default.nix`, in the line with
    `moz_overlay.rustChannelOf { ... }`.
+   CAVEAT: there is a second `rustChannelOf` for the stable `rustc` too.
 2. Invalidate `rustStdDepsHash` in `default.nix`.
 3. Run `nix-build -A rts`. You should get an error message about the expected
    value of `rustStdDepsHash`.
 4. Update `rustStdDepsHash` with the expected value in the error message.
+
+(Can this be automated?)
+
+--------
+**The above doesn't always work**
+
+Sometimes you want to also bump the  `.toml` dependencies...
+
+E.g. when you get `perhaps a crate was updated and forgotten to be
+re-vendored?`, proceed as follows:
+[Invalid recipe deleted. Try `cabal update in `rts/motoko-rts*`,
+ invalidate hashes: {`cargoVendorTools.cargoSha256`, `rustStdDepsHash`, `rtsDeps.sha256`}
+ all at the same time and then `nix-build -A rts -K` to examine the build products.]
 
 Running RTS tests
 -----------------

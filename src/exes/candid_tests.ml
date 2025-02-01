@@ -14,6 +14,7 @@ let name = "candid-tests"
 let version = "0.1"
 let banner = "Candid test suite runner " ^ version ^ ""
 let usage = "Usage: " ^ name ^ " [ -i path/to/candid/test ]"
+let _WASMTIME_OPTIONS_ = "--disable-cache --enable-cranelift-nan-canonicalization --wasm-features=memory64,multi-memory,bulk-memory"
 
 (* Argument handling *)
 
@@ -40,13 +41,7 @@ let argspec = Arg.align
 
 (* IO *)
 
-let load_file f =
-  let ic = open_in_bin f in
-  let n = in_channel_length ic in
-  let s = Bytes.create n in
-  really_input ic s 0 n;
-  close_in ic;
-  Bytes.to_string s
+module Pretty = Type.MakePretty(Type.ElideStamps)
 
 let write_file f s =
   let oc_ = open_out f in
@@ -54,8 +49,8 @@ let write_file f s =
   close_out oc_
 
 let print_type = function
-  | [t] -> "(" ^ Type.string_of_typ t ^ ")" (* add parens to make this unary *)
-  | ts -> Type.string_of_typ (Type.Tup ts)
+  | [t] -> "(" ^ Pretty.string_of_typ t ^ ")" (* add parens to make this unary *)
+  | ts -> Pretty.string_of_typ (Type.Tup ts)
 
 type expected_behaviour = ShouldPass | ShouldTrap
 
@@ -76,15 +71,15 @@ let mo_of_test tenv test : (string * expected_behaviour, string) result =
   let not_equal e1 e2 = "assert (" ^ e1 ^ " != " ^ e2 ^ ")\n" in
   let ignore ts e =
     let open Type in
-    if sub (seq ts) unit then e (* avoid warnign about redundant ignore *)
+    if sub (seq ts) unit then e (* avoid warning about redundant ignore *)
     else "ignore (" ^ e ^ ")\n" in
 
   try
     let defs =
-      "import Prim \"mo:⛔\";" ^
+      "import _Prim \"mo:⛔\";" ^
       String.concat "" (List.map (fun (n,candid_typ) ->
         let mo_typ = Idl_to_mo.check_typ tenv candid_typ in
-        "type " ^ n ^ " = " ^ Type.string_of_typ mo_typ ^ ";\n"
+        "type " ^ n ^ " = " ^ Pretty.string_of_typ mo_typ ^ ";\n"
       ) (Typing.Env.bindings tenv)) ^ "\n" in
 
     let ts = Idl_to_mo.check_typs tenv (test.it.ttyp) in
@@ -153,7 +148,7 @@ type outcome =
  | UnwantedTrap of (string * string) (* stdout, stderr *)
  | Timeout
  | Ignored of string
- | CantCompile of (string * string) (* stdout, stderr *)
+ | CantCompile of (string * string * string) (* stdout, stderr, src *)
 
 let red s = "\027[31m" ^ s ^ "\027[0m"
 let green s = "\027[32m" ^ s ^ "\027[0m"
@@ -195,9 +190,9 @@ let report_outcome counts expected_fail outcome =
   | _, Ignored why ->
     bump counts.ignored;
     Printf.printf " %s\n" (grey (Printf.sprintf "ignored (%s)" why))
-  | _, CantCompile (stdout, stderr) ->
+  | _, CantCompile (stdout, stderr, src) ->
     bump counts.fail;
-    Printf.printf " %s\n%s%s\n" (red "not ok (cannot compile)") stdout stderr
+    Printf.printf " %s\n%s%s\n%s" (red "not ok (cannot compile)") stdout stderr src
 
 (* Main *)
 let () =
@@ -258,9 +253,9 @@ let () =
             Unix.putenv "MOC_UNLOCK_PRIM" "yesplease";
             write_file "tmp.mo" src;
             match run_cmd "moc -Werror -wasi-system-api tmp.mo -o tmp.wasm" with
-            | ((Fail | Timeout), stdout, stderr) -> CantCompile (stdout, stderr)
+            | ((Fail | Timeout), stdout, stderr) -> CantCompile (stdout, stderr, src)
             | (Ok, _, _) ->
-              match must_not_trap, run_cmd "timeout 10s wasmtime --disable-cache --cranelift tmp.wasm" with
+              match must_not_trap, run_cmd ("timeout 10s wasmtime "^ _WASMTIME_OPTIONS_ ^" tmp.wasm") with
               | ShouldPass, (Ok, _, _) -> WantedPass
               | ShouldTrap, (Fail, _, _) -> WantedTrap
               | ShouldPass, (Fail, stdout, stderr) -> UnwantedTrap (stdout, stderr)

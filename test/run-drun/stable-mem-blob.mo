@@ -2,30 +2,29 @@ import P "mo:⛔";
 import StableMemory "stable-mem/StableMemory";
 actor {
 
-  stable var n : Nat32 = 0;
+  stable var n : Nat64 = 0;
   assert (n == StableMemory.size());
 
-  func valOfNat32(n : Nat32) : Blob {
-    let size = P.nat32ToNat(n);
+  func valOfNat64(n : Nat64) : Blob {
+    let size = P.nat64ToNat(n);
     let a = P.Array_tabulate<Nat8>(size, func i { P.natToNat8(i % 256) });
     P.arrayToBlob(a);
   };
 
-  func zeroOfNat32(n : Nat32) : Blob {
-    let size = P.nat32ToNat(n);
+  func zeroOfNat64(n : Nat64) : Blob {
+    let size = P.nat64ToNat(n);
     let a = P.Array_tabulate<Nat8>(size, func i { 0 });
     P.arrayToBlob(a);
   };
 
-  let inc : Nat32 = 8;
-
-  var i : Nat32 = 0;
-  var size : Nat32 = 0;
+  var i : Nat64 = 0;
+  var size : Nat64 = 0;
   let max = n * 65536;
   while (i + size < max) {
-    let v = valOfNat32(size);
+    let v = valOfNat64(size);
+    //P.debugPrint("store blob, load blob.");
     StableMemory.storeBlob(i, v);
-    assert (StableMemory.loadBlob(i, P.nat32ToNat(size)) == v);
+    assert (StableMemory.loadBlob(i, P.nat64ToNat(size)) == v);
     i += size;
     size += 1;
   };
@@ -43,12 +42,21 @@ actor {
     assert (n == StableMemory.size());
 
     // check new page is clear
-    var i : Nat32 = m * 65536;
-    var size : Nat32 = 0;
+    var i : Nat64 = m * 65536;
+    var size : Nat64 = 0;
     let max = i + 65536;
     while (i + size < max) {
-      assert (StableMemory.loadBlob(i, P.nat32ToNat(size)) == zeroOfNat32(size));
-      StableMemory.storeBlob(i, valOfNat32(size));
+      if false {
+      P.debugPrint("i = " # debug_show i # "; size = " # debug_show size);
+      P.debugPrint("inspecting the blob at offset " # debug_show i # " and expecting all zeros...");
+      P.debugPrint(debug_show StableMemory.loadBlob(i, P.nat64ToNat(size)));
+      };
+
+      assert (StableMemory.loadBlob(i, P.nat64ToNat(size)) == zeroOfNat64(size));
+      let blob = valOfNat64(size);
+      // P.debugPrint("storing the blob " # debug_show blob # " at offset " # debug_show i);
+
+      StableMemory.storeBlob(i, blob);
       i += size;
       size += 1;
     };
@@ -60,7 +68,7 @@ actor {
     assert (n == StableMemory.size());
     P.debugPrint (debug_show {testBounds=n});
     // test bounds check
-    var i : Nat32 = n * 65536 - 7;
+    var i : Nat64 = n * 65536 - 7;
     let max = i + 16;
     while (i < max) {
       try {
@@ -73,7 +81,7 @@ actor {
         assert P.errorCode e == #canister_error;
       };
       try {
-        await async StableMemory.storeBlob(i, valOfNat32(8));
+        await async StableMemory.storeBlob(i, valOfNat64(8));
         assert false;
       }
       catch e {

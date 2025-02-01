@@ -1,5 +1,6 @@
 open Source
 open Ir
+open Mo_types
 
 (* We collect a few things along the way *)
 
@@ -83,8 +84,8 @@ let rec pat p : td = match p.it with
   | VarP i          -> M.singleton i p.note
   | TupP ps         -> pats ps
   | ObjP pfs        -> pats (pats_of_obj_pat pfs)
-  | OptP p          -> pat p
-  | TagP (i, p)     -> pat p
+  | OptP p
+  | TagP (_, p)     -> pat p
   | AltP (p1, p2)   -> pat p1 +- pat p2
 
 and pats ps : td = List.(fold_left (+-) M.empty (map pat ps))
@@ -95,10 +96,14 @@ let args as_ : fd = union_binders arg as_
 
 let id i = M.singleton i {captured = false; eager = true}
 
-let fields fs = unions (fun f -> id f.it.var) fs
+(* The mutable fields of an IR object behave a bit like a lambda, in that they capture mutable
+boxes by reference. So set captured = true for them. *)
+let fields fs = unions (fun f ->
+  M.singleton f.it.var {captured = Type.is_mut f.note; eager = true}
+) fs
 
 let rec exp e : f = match e.it with
-  | VarE i              -> id i
+  | VarE (_, i)         -> id i
   | LitE l              -> M.empty
   | PrimE (_, es)       -> exps es
   | AssignE (e1, e2)    -> lexp e1 ++ exp e2
@@ -107,18 +112,25 @@ let rec exp e : f = match e.it with
   | SwitchE (e, cs)     -> exp e ++ cases cs
   | LoopE e1            -> exp e1
   | LabelE (i, t, e)    -> exp e
-  | AsyncE (_, e, _)    -> exp e
+  | AsyncE (_, _, e, _) -> exp e
   | DeclareE (i, t, e)  -> exp e  // i
   | DefineE (i, m, e)   -> id i ++ exp e
   | FuncE (x, s, c, tp, as_, t, e) -> under_lambda (exp e /// args as_)
   | ActorE (ds, fs, u, _)  -> actor ds fs u
   | NewObjE (_, fs, _)  -> fields fs
-  | TryE (e, cs)        -> exp e ++ cases cs
-  | SelfCallE (_, e1, e2, e3) -> under_lambda (exp e1) ++ exp e2 ++ exp e3
+  | TryE (e, cs, cl)    -> exp e ++ cases cs ++ (match cl with Some (v, _) -> id v | _ -> M.empty)
+  | SelfCallE (_, e1, e2, e3, e4) -> under_lambda (exp e1) ++ exps [e2; e3; e4]
 
 and actor ds fs u = close (decs ds +++ fields fs +++ system u)
 
-and system {meta; preupgrade; postupgrade} = under_lambda (exp preupgrade) ++ under_lambda (exp postupgrade)
+and system {meta; preupgrade; postupgrade; heartbeat; timer; inspect; low_memory; stable_record; _} =
+  under_lambda (exp preupgrade) ++
+  under_lambda (exp postupgrade) ++
+  under_lambda (exp heartbeat) ++
+  under_lambda (exp timer) ++
+  under_lambda (exp inspect) ++
+  under_lambda (exp low_memory) ++
+  under_lambda (exp stable_record)
 
 and exps es : f = unions exp es
 
@@ -134,6 +146,7 @@ and cases cs : f = unions case cs
 and dec d = match d.it with
   | LetD (p, e) -> fd_of_defs (pat p) +++ exp e
   | VarD (i, t, e) -> fd_of_defs (M.singleton i t) +++ exp e
+  | RefD (i, t, e) -> fd_of_defs (M.singleton i t) +++ lexp e
 
 (* The variables captured by a function. May include the function itself! *)
 and captured e =

@@ -10,7 +10,7 @@ let usage = "Usage: " ^ name ^ " [option] [file ...]"
 
 (* Argument handling *)
 
-type mode = Default | Check | StableCompatible | Compile | Run | Interact | PrintDeps | Explain
+type mode = Default | Check | StableCompatible | Compile | Run | Interact | PrintDeps | Explain | Viper
 
 let mode = ref Default
 let args = ref []
@@ -33,14 +33,17 @@ let idl = ref false
 let valid_metadata_names =
     ["candid:args";
      "candid:service";
-     "motoko:stable-types"]
+     "motoko:stable-types";
+     "motoko:compiler"]
 
 let argspec = [
+  "--ai-errors", Arg.Set Flags.ai_errors, " emit AI tailored errors";
   "-c", Arg.Unit (set_mode Compile), " compile programs to WebAssembly";
   "-g", Arg.Set Flags.debug_info, " generate source-level debug information";
   "-r", Arg.Unit (set_mode Run), " interpret programs";
   "-i", Arg.Unit (set_mode Interact), " run interactive REPL (implies -r)";
   "--check", Arg.Unit (set_mode Check), " type-check only";
+  "--viper", Arg.Unit (set_mode Viper), " emit viper code";
   "--stable-compatible",
     Arg.Tuple [
       Arg.String (fun fp -> Flags.pre_ref := Some fp);
@@ -53,13 +56,14 @@ let argspec = [
     set_mode Compile ()), (* similar to --stable-types *)
       " compile and emit Candid IDL specification to `.did` file";
   "--print-deps", Arg.Unit (set_mode PrintDeps), " prints the dependencies for a given source file";
+  "--print-source-on-error", Arg.Set Flags.print_source_on_error, " prints the source code for error messages";
   "--explain", Arg.String (fun c -> explain_code := c; set_mode Explain ()), " provides a detailed explanation of an error message";
   "-o", Arg.Set_string out_file, "<file>  output file";
 
   "-v", Arg.Set Flags.verbose, " verbose output";
   "-p", Arg.Set_int Flags.print_depth, "<n>  set print depth";
   "--hide-warnings", Arg.Clear Flags.print_warnings, " hide warnings";
-  "-Werror", Arg.Set Flags.warnings_are_errors, " treat warnings as werrors";
+  "-Werror", Arg.Set Flags.warnings_are_errors, " treat warnings as errors";
   ]
 
   @ Args.error_args
@@ -88,11 +92,19 @@ let argspec = [
       String.concat " or " valid_metadata_names ^
       ") as `public` (default is `private`)";
 
+  "--omit-metadata",
+    Arg.String (fun n -> Flags.(omit_metadata_names := n :: !omit_metadata_names)),
+    "<name>  omit icp custom section <name> (" ^
+      String.concat " or " valid_metadata_names ^
+      ")";
+
   "-iR", Arg.Set interpret_ir, " interpret the lowered code";
+  "-measure-rts-stack", Arg.Set Flags.measure_rts_stack, " measure the maximum rts stack usage (reported by prim \"rts_max_stack\")";
   "-no-await", Arg.Clear Flags.await_lowering, " no await-lowering (with -iR)";
   "-no-async", Arg.Clear Flags.async_lowering, " no async-lowering (with -iR)";
 
   "-no-link", Arg.Clear link, " do not statically link-in runtime";
+  "-no-timer", Arg.Clear Flags.global_timer, " do not create a global timer expiration endpoint";
   "-no-system-api",
     Arg.Unit (fun () -> Flags.(compile_mode := WasmMode)),
       " do not import any system API";
@@ -100,7 +112,7 @@ let argspec = [
     Arg.Unit (fun () -> Flags.(compile_mode := WASIMode)),
       " use the WASI system API (wasmtime)";
   "-ref-system-api",
-    Arg.Unit (fun () -> Flags.(compile_mode := RefMode)),
+  Arg.Unit (fun () -> Flags.(compile_mode := RefMode)),
       " use the reference implementation of the Internet Computer system API (ic-ref-run)";
   (* TODO: bring this back (possibly with flipped default)
            as soon as the multi-value `wasm` library is out.
@@ -131,20 +143,86 @@ let argspec = [
     set_mode Compile ()), (* similar to --idl *)
       " compile and emit signature of stable types to `.most` file";
 
+  "--stable-regions",
+  Arg.Unit (fun () ->
+    Flags.use_stable_regions := true),
+      " force eager initialization of stable regions metadata (for testing purposes); consumes between 386KiB or 8MiB of additional physical stable memory, depending on current use of ExperimentalStableMemory library";
+
+  "--generational-gc",
+  Arg.Unit (fun () -> Flags.gc_strategy := Mo_config.Flags.Generational),
+  " use generational GC (only available with classical persistence)";
+
+  "--incremental-gc",
+  Arg.Unit (fun () -> Flags.gc_strategy := Mo_config.Flags.Incremental),
+  " use incremental GC (default with enhanced orthogonal persistence)";
+
   "--compacting-gc",
   Arg.Unit (fun () -> Flags.gc_strategy := Mo_config.Flags.MarkCompact),
-  " use compacting GC";
+  " use compacting GC (only available with classical persistence)";
 
   "--copying-gc",
   Arg.Unit (fun () -> Flags.gc_strategy := Mo_config.Flags.Copying),
-  " use copying GC (default)";
+  " use copying GC (default and only available with classical persistence)";
 
   "--force-gc",
   Arg.Unit (fun () -> Flags.force_gc := true),
   " disable GC scheduling, always do GC after an update message (for testing)";
-    ]
 
-  @  Args.inclusion_args
+  "--experimental-stable-memory",
+  Arg.Set_int Flags.experimental_stable_memory,
+  " <n> select support for the deprecated `ExperimentalStableMemory.mo` library (n < 0: error, n == 0: warn, n > 0: allow) (default " ^ (Int.to_string Flags.experimental_stable_memory_default) ^ ")";
+
+  "--max-stable-pages",
+  Arg.Set_int Flags.max_stable_pages,
+  "<n>  set maximum number of pages available for library `ExperimentalStableMemory.mo` (default " ^ (Int.to_string Flags.max_stable_pages_default) ^ ")";
+
+  "--experimental-field-aliasing",
+  Arg.Unit (fun () -> Flags.experimental_field_aliasing := true),
+  " enable experimental support for aliasing of var fields";
+
+  "--experimental-rtti",
+  Arg.Unit (fun () -> Flags.rtti := true),
+  " enable experimental support for precise runtime type information (default with enhanced orthogonal persistence)";
+
+  "--rts-stack-pages",
+  Arg.Int (fun pages -> Flags.rts_stack_pages := Some pages),
+  "<n>  set maximum number of pages available for runtime system stack (default " ^ (Int.to_string Flags.rts_stack_pages_default) ^ ", only available with classical persistence)";
+
+  "--trap-on-call-error",
+  Arg.Unit (fun () -> Flags.trap_on_call_error := true),
+  " Trap, don't throw an `Error`, when an IC call fails due to destination queue full or freezing threshold is crossed. Emulates behaviour of moc versions < 0.8.0.";
+
+  (* persistence *)
+  "--enhanced-orthogonal-persistence",
+  Arg.Unit (fun () -> Flags.enhanced_orthogonal_persistence := true),
+  " Use enhanced orthogonal persistence (experimental): Scalable and fast upgrades using a persistent 64-bit main memory.";
+
+  "--stabilization-instruction-limit",
+  Arg.Int (fun limit -> Flags.(stabilization_instruction_limit := {
+    upgrade = limit; 
+    update_call = limit;
+  })),
+  "<n>  set instruction limit for incremental graph-copy-based stabilization and destabilization (for testing)";
+
+  "--stable-memory-access-limit",
+  Arg.Int (fun limit -> Flags.(stable_memory_access_limit := {
+    upgrade = limit; 
+    update_call = limit;
+  })),
+  "<n>  set stable memory access limit for incremental graph-copy-based stabilization and destabilization (for testing)";
+
+  (* optimizations *)
+  "-fno-shared-code",
+  Arg.Unit (fun () -> Flags.share_code := false),
+  " do *not* share low-level utility code: larger code size but decreased cycle consumption (default)";
+
+  "-fshared-code",
+  Arg.Unit (fun () -> Flags.share_code := true),
+  " do share low-level utility code: smaller code size but increased cycle consumption"
+
+  ]
+
+  @ Args.inclusion_args
 
 
 
@@ -174,6 +252,9 @@ let process_files files : unit =
     exit_on_none (Pipeline.run_files_and_stdin files)
   | Check ->
     Diag.run (Pipeline.check_files files)
+  | Viper ->
+    let (s, _) = Diag.run (Pipeline.viper_files files) in
+    printf "%s" s
   | StableCompatible ->
     begin
       match (!Flags.pre_ref, !Flags.post_ref) with
@@ -203,9 +284,11 @@ let process_files files : unit =
       end;
 
     if !idl then begin
+      let open Idllib in
       let did_file = Filename.remove_extension !out_file ^ ".did" in
       let oc = open_out did_file in
-      let idl_code = Idllib.Arrange_idl.string_of_prog idl_prog in
+      let module WithComments = Arrange_idl.Make(struct let trivia = Some idl_prog.Source.note.Syntax.trivia end) in
+      let idl_code = WithComments.string_of_prog idl_prog in
       output_string oc idl_code; close_out oc
     end;
 
@@ -249,17 +332,17 @@ let process_profiler_flags () =
   ProfilerFlags.profile_field_names := !Flags.profile_field_names;
   ()
 
-let process_public_metadata_names () =
+let process_metadata_names kind =
   List.iter
     (fun s ->
       if not (List.mem s valid_metadata_names) then
         begin
-          eprintf "moc: --public-metadata argument %s must be one of %s"
+          eprintf "moc: --%s-metadata argument %s must be one of %s"
+            kind
             s
             (String.concat ", " valid_metadata_names);
           exit 1
         end)
-    (!Flags.public_metadata_names)
 
 let () =
   (*
@@ -277,9 +360,14 @@ let () =
   end;
 
   process_profiler_flags ();
-  process_public_metadata_names ();
+  process_metadata_names "public" !Flags.public_metadata_names;
+  process_metadata_names "omit" !Flags.omit_metadata_names;
   try
-    process_files !args
+    match process_files !args with
+      (* TODO: Find a better place to gracefully handle the input-dependent linker error *)
+    | exception Linking.LinkModule.TooLargeDataSegments error_message ->
+      Printf.eprintf "Error: %s" error_message; ()
+    | () -> ()
   with
   | Sys_error msg ->
     (* IO error *)

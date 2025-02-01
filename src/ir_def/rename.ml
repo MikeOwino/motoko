@@ -15,25 +15,41 @@ let id_bind rho i =
   let i' = fresh_id i in
   (i', Renaming.add i i' rho)
 
+let rec ids_bind rho = function
+  | [] -> rho
+  | i::is' ->
+    let (i', rho') = id_bind rho i in
+    ids_bind rho' is'
+
 let arg_bind rho a =
   let i' = fresh_id a.it in
   ({a with it = i'}, Renaming.add a.it i' rho)
 
 let rec prim rho p =
-  Ir.map_prim (fun t -> t) (id rho) p (* rename BreakPrim id etc *)
+  Ir.map_prim Fun.id (id rho) p (* rename BreakPrim id etc *)
 
 and exp rho e  =  {e with it = exp' rho e.it}
-and exp' rho e  = match e with
-  | VarE i              -> VarE (id rho i)
-  | LitE l              -> e
+and exp' rho = function
+  | VarE (m, i)         -> VarE (m, id rho i)
+  | LitE _ as e         -> e
   | PrimE (p, es)       -> PrimE (prim rho p, List.map (exp rho) es)
-  | ActorE (ds, fs, { meta; preupgrade; postupgrade }, t) ->
+  | ActorE (ds, fs, { meta; preupgrade; postupgrade; heartbeat; timer; inspect; low_memory; stable_record; stable_type}, t) ->
     let ds', rho' = decs rho ds in
     ActorE
       (ds',
        fields rho' fs,
-       {meta; preupgrade = exp rho' preupgrade; postupgrade = exp rho' postupgrade},
+       {meta;
+        preupgrade = exp rho' preupgrade;
+        postupgrade = exp rho' postupgrade;
+        heartbeat = exp rho' heartbeat;
+        timer = exp rho' timer;
+        inspect = exp rho' inspect;
+        low_memory = exp rho' low_memory;
+        stable_type = stable_type;
+        stable_record = exp rho' stable_record;
+       },
        t)
+
   | AssignE (e1, e2)    -> AssignE (lexp rho e1, exp rho e2)
   | BlockE (ds, e1)     -> let ds', rho' = decs rho ds
                            in BlockE (ds', exp rho' e1)
@@ -42,7 +58,7 @@ and exp' rho e  = match e with
   | LoopE e1            -> LoopE (exp rho e1)
   | LabelE (i, t, e)    -> let i',rho' = id_bind rho i in
                            LabelE(i', t, exp rho' e)
-  | AsyncE (tb, e, t)   -> AsyncE (tb, exp rho e, t)
+  | AsyncE (s, tb, e, t) -> AsyncE (s, tb, exp rho e, t)
   | DeclareE (i, t, e)  -> let i',rho' = id_bind rho i in
                            DeclareE (i', t, exp rho' e)
   | DefineE (i, m, e)   -> DefineE (id rho i, m, exp rho e)
@@ -51,9 +67,9 @@ and exp' rho e  = match e with
      let e' = exp rho' e in
      FuncE (x, s, c, tp, p', ts, e')
   | NewObjE (s, fs, t)  -> NewObjE (s, fields rho fs, t)
-  | TryE (e, cs)        -> TryE (exp rho e, cases rho cs)
-  | SelfCallE (ts, e1, e2, e3) ->
-     SelfCallE (ts, exp rho e1, exp rho e2, exp rho e3)
+  | TryE (e, cs, cl)    -> TryE (exp rho e, cases rho cs, Option.map (fun (v, t) -> id rho v, t) cl)
+  | SelfCallE (ts, e1, e2, e3, e4) ->
+     SelfCallE (ts, exp rho e1, exp rho e2, exp rho e3, exp rho e4)
 
 and lexp rho le = {le with it = lexp' rho le.it}
 and lexp' rho = function
@@ -75,37 +91,68 @@ and args rho as_ =
      (a'::as_', rho'')
 
 and pat rho p =
-    let p',rho = pat' rho p.it in
-    {p with it = p'}, rho
+  let p', rho = pat' rho p.it in
+  {p with it = p'}, rho
 
-and pat' rho p = match p with
-  | WildP         -> (p, rho)
-  | VarP i        ->
+and pat' rho = function
+  | WildP as p    -> (p, rho)
+  | VarP i ->
     let i, rho' = id_bind rho i in
-     (VarP i, rho')
-  | TupP ps       -> let (ps, rho') = pats rho ps in
-                     (TupP ps, rho')
-  | ObjP pfs      ->
+    (VarP i, rho')
+  | TupP ps ->
+    let (ps, rho') = pats rho ps in
+    (TupP ps, rho')
+  | ObjP pfs ->
     let (pats, rho') = pats rho (pats_of_obj_pat pfs) in
     (ObjP (replace_obj_pat pfs pats), rho')
-  | LitP l        -> (p, rho)
-  | OptP p        -> let (p', rho') = pat rho p in
-                     (OptP p', rho')
-  | TagP (i, p)   -> let (p', rho') = pat rho p in
-                     (TagP (i, p'), rho')
-  | AltP (p1, p2) -> assert(Freevars.(M.is_empty (pat p1)));
-                     assert(Freevars.(M.is_empty (pat p2)));
-                     let (p1', _) = pat rho p1 in
-                     let (p2' ,_) = pat rho p2 in
-                     (AltP (p1', p2'), rho)
+  | LitP _ as p ->
+    (p, rho)
+  | OptP p ->
+    let (p', rho') = pat rho p in
+    (OptP p', rho')
+  | TagP (i, p) ->
+    let (p', rho') = pat rho p in
+    (TagP (i, p'), rho')
+  | AltP (p1, p2) ->
+    let is1 = Freevars.M.keys (Freevars.pat p1) in
+    assert begin
+      let is2 = Freevars.M.keys (Freevars.pat p1) in
+      List.compare String.compare is1 is2 = 0
+    end;
+    let rho' = ids_bind rho is1 in
+    (AltP (pat_subst rho' p1, pat_subst rho' p2), rho')
 
 and pats rho ps  =
   match ps with
-  | [] -> ([],rho)
+  | [] -> ([], rho)
   | p::ps ->
-     let (p', rho') = pat rho p in
-     let (ps', rho'') = pats rho' ps in
-     (p'::ps', rho'')
+    let (p', rho') = pat rho p in
+    let (ps', rho'') = pats rho' ps in
+    (p'::ps', rho'')
+
+and pat_subst rho p =
+    let p'  = pat_subst' rho p.it in
+    {p with it = p'}
+
+and pat_subst' rho = function
+  | WildP as p -> p
+  | VarP i ->
+    VarP (id rho i)
+  | TupP ps ->
+    TupP (pats_subst rho ps)
+  | ObjP pfs ->
+    let pats = pats_subst rho (pats_of_obj_pat pfs) in
+    ObjP (replace_obj_pat pfs pats)
+  | LitP _ as p -> p
+  | OptP p ->
+    OptP (pat_subst rho p)
+  | TagP (i, p) ->
+    TagP (i, pat_subst rho p)
+  | AltP (p1, p2) ->
+    AltP (pat_subst rho p1, pat_subst rho p2)
+
+and pats_subst rho ps =
+  List.map (pat_subst rho) ps
 
 and case rho (c : case) =
   {c with it = case' rho c.it}
@@ -120,7 +167,7 @@ and dec rho d =
   let (mk_d, rho') = dec' rho d.it in
   ({d with it = mk_d}, rho')
 
-and dec' rho d = match d with
+and dec' rho = function
   | LetD (p, e) ->
      let p', rho = pat rho p in
      (fun rho' -> LetD (p',exp rho' e)),
@@ -128,6 +175,10 @@ and dec' rho d = match d with
   | VarD (i, t, e) ->
      let i', rho = id_bind rho i in
      (fun rho' -> VarD (i', t, exp rho' e)),
+     rho
+  | RefD (i, t, le) ->
+     let i', rho = id_bind rho i in
+     (fun rho' -> RefD (i', t, lexp rho' le)),
      rho
 
 and decs rho ds =
@@ -150,7 +201,7 @@ let comp_unit rho cu = match cu with
   | LibU (ds, e) ->
     let ds', rho' = decs rho ds
     in LibU (ds', exp rho' e)
-  | ActorU (as_opt, ds, fs, { meta; preupgrade; postupgrade }, t) ->
+  | ActorU (as_opt, ds, fs, { meta; preupgrade; postupgrade; heartbeat; timer; inspect; low_memory; stable_record; stable_type }, t) ->
     let as_opt', rho' = match as_opt with
       | None -> None, rho
       | Some as_ ->
@@ -159,4 +210,13 @@ let comp_unit rho cu = match cu with
     in
     let ds', rho'' = decs rho' ds in
     ActorU (as_opt', ds', fields rho'' fs,
-      { meta; preupgrade = exp rho'' preupgrade; postupgrade = exp rho'' postupgrade }, t)
+      { meta;
+        preupgrade = exp rho'' preupgrade;
+        postupgrade = exp rho'' postupgrade;
+        heartbeat = exp rho'' heartbeat;
+        timer = exp rho'' timer;
+        inspect = exp rho'' inspect;
+        low_memory = exp rho'' low_memory;
+        stable_record = exp rho'' stable_record;
+        stable_type = stable_type;
+      }, t)

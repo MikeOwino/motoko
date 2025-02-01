@@ -10,7 +10,7 @@ open T
 
 (* Erase type fields from object types *)
 
-module ConRenaming = E.Make(struct type t = T.con let compare = Con.compare end)
+module ConRenaming = E.Make(struct type t = T.con let compare = Cons.compare end)
 
 let transform prog =
 
@@ -51,7 +51,7 @@ let transform prog =
       Func (s, c, List.map t_bind tbs, List.map t_typ ts1, List.map t_typ ts2)
     | Opt t -> Opt (t_typ t)
     | Variant fs -> Variant (List.map t_field fs)
-    | Async (t1, t2) -> Async (t_typ t1, t_typ t2)
+    | Async (s, t1, t2) -> Async (s, t_typ t1, t_typ t2)
     | Mut t -> Mut (t_typ t)
     | Any -> Any
     | Non -> Non
@@ -71,22 +71,22 @@ let transform prog =
       T.Def (t_binds typ_binds, t_typ typ)
 
   and t_con c =
-    match Con.kind c with
+    match Cons.kind c with
     | T.Def ([], T.Prim _) -> c
     | _ ->
       match  ConRenaming.find_opt c (!con_renaming) with
       | Some c' -> c'
       | None ->
-        let clone = Con.clone c (Abs ([], Pre)) in
+        let clone = Cons.clone c (Abs ([], Pre)) in
         con_renaming := ConRenaming.add c clone (!con_renaming);
         (* Need to extend con_renaming before traversing the kind *)
-        Type.set_kind clone (t_kind (Con.kind c));
+        Type.set_kind clone (t_kind (Cons.kind c));
         clone
 
-  and t_prim p = Ir.map_prim t_typ (fun id -> id) p
+  and t_prim p = Ir.map_prim t_typ Fun.id p
 
-  and t_field {lab; typ; depr} =
-    { lab; typ = t_typ typ; depr }
+  and t_field {lab; typ; src} =
+    { lab; typ = t_typ typ; src }
   in
 
   let rec t_exp (exp : exp) =
@@ -100,8 +100,8 @@ let transform prog =
   and t_exp' (exp : exp) =
     let exp' = exp.it in
     match exp' with
-    | LitE _ -> exp'
-    | VarE id -> exp'
+    | LitE _
+    | VarE _ -> exp'
     | AssignE (exp1, exp2) ->
       AssignE (t_lexp exp1, t_exp exp2)
     | PrimE (p, exps) ->
@@ -116,19 +116,30 @@ let transform prog =
       LoopE (t_exp exp1)
     | LabelE (id, typ, exp1) ->
       LabelE (id, t_typ typ, t_exp exp1)
-    | AsyncE (tb, exp1, typ) ->
-      AsyncE (t_typ_bind tb, t_exp exp1, t_typ typ)
-    | TryE (exp1, cases) ->
-      TryE (t_exp exp1, List.map t_case cases)
+    | AsyncE (s, tb, exp1, typ) ->
+      AsyncE (s, t_typ_bind tb, t_exp exp1, t_typ typ)
+    | TryE (exp1, cases, vt) ->
+      TryE (t_exp exp1, List.map t_case cases, vt)
     | DeclareE (id, typ, exp1) ->
       DeclareE (id, t_typ typ, t_exp exp1)
     | DefineE (id, mut ,exp1) ->
       DefineE (id, mut, t_exp exp1)
     | FuncE (x, s, c, typbinds, args, ret_tys, exp) ->
       FuncE (x, s, c, t_typ_binds typbinds, t_args args, List.map t_typ ret_tys, t_exp exp)
-    | ActorE (ds, fs, {meta; preupgrade; postupgrade}, typ) ->
+    | ActorE (ds, fs, {meta; preupgrade; postupgrade; heartbeat; timer; inspect; low_memory; stable_record; stable_type}, typ) ->
       ActorE (t_decs ds, t_fields fs,
-        {meta; preupgrade = t_exp preupgrade; postupgrade = t_exp postupgrade}, t_typ typ)
+       {meta;
+        preupgrade = t_exp preupgrade;
+        postupgrade = t_exp postupgrade;
+        heartbeat = t_exp heartbeat;
+        timer = t_exp timer;
+        inspect = t_exp inspect;
+        low_memory = t_exp low_memory;
+        stable_record = t_exp stable_record;
+        stable_type = t_typ stable_type;
+       },
+       t_typ typ)
+
     | NewObjE (sort, ids, t) ->
       NewObjE (sort, t_fields ids, t_typ t)
     | SelfCallE _ -> assert false
@@ -155,6 +166,7 @@ let transform prog =
     match dec' with
     | LetD (pat,exp) -> LetD (t_pat pat,t_exp exp)
     | VarD (id, t, exp) -> VarD (id, t_typ t, t_exp exp)
+    | RefD (id, t, lexp) -> RefD (id, t_typ t, t_lexp lexp)
 
   and t_decs decs = List.map t_dec decs
 
@@ -200,9 +212,19 @@ let transform prog =
   and t_comp_unit = function
     | LibU _ -> raise (Invalid_argument "cannot compile library")
     | ProgU ds -> ProgU (t_decs ds)
-    | ActorU (args_opt, ds, fs, {meta; preupgrade; postupgrade}, t) ->
+    | ActorU (args_opt, ds, fs, {meta; preupgrade; postupgrade; heartbeat; timer; inspect; low_memory; stable_record; stable_type}, t) ->
       ActorU (Option.map t_args args_opt, t_decs ds, t_fields fs,
-        { meta; preupgrade = t_exp preupgrade; postupgrade = t_exp postupgrade }, t_typ t)
+        { meta;
+          preupgrade = t_exp preupgrade;
+          postupgrade = t_exp postupgrade;
+          heartbeat = t_exp heartbeat;
+          timer = t_exp timer;
+          inspect = t_exp inspect;
+          low_memory = t_exp low_memory;
+          stable_record = t_exp stable_record;
+          stable_type = t_typ stable_type;
+        },
+        t_typ t)
   and t_prog (cu, flavor) = (t_comp_unit cu, { flavor with has_typ_field = false } )
 in
   t_prog prog
